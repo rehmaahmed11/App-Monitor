@@ -39,18 +39,21 @@ public class MonitorService extends Service {
 
     private static volatile MonitorEngine engine;
 
-    private final java.util.concurrent.ExecutorService bootstrap =
+    /**
+     * Every start and every stop runs here, in submission order. It is static and
+     * never shut down on purpose: a "stop this session, start that one" tap
+     * destroys and recreates the service, and the old session's teardown (root
+     * streams, iptables chains) must still finish before the new session installs
+     * its own. A per-instance executor let the two overlap.
+     */
+    private static final java.util.concurrent.ExecutorService bootstrap =
             java.util.concurrent.Executors.newSingleThreadExecutor(runnable -> {
                 Thread t = new Thread(runnable, "applens-bootstrap");
                 t.setDaemon(true);
                 return t;
             });
 
-    private final Object engineLock = new Object();
-    private volatile String pendingPkg = "";
-    private volatile String pendingLabel = "";
-    private volatile int pendingUid = -1;
-
+    private static final Object engineLock = new Object();
     public static boolean isRunning() {
         MonitorEngine local = engine;
         return local != null && local.isRunning();
@@ -139,6 +142,12 @@ public class MonitorService extends Service {
             startVpn(pkg, label, uid);
         }
         final boolean shouldLaunch = launchTarget;
+        final String targetPkg = pkg;
+        final String targetLabel = label;
+        final int targetUid = uid;
+        // The application context outlives this service instance, which matters
+        // because the task below is queued behind the previous session's teardown.
+        final Context app = getApplicationContext();
         // Opening the record file and negotiating the root session spawns processes,
         // so it must not happen on the service main thread.
         bootstrap.execute(new Runnable() {
@@ -148,24 +157,23 @@ public class MonitorService extends Service {
                     MonitorEngine local;
                     synchronized (engineLock) {
                         if (engine == null) {
-                            engine = new MonitorEngine(MonitorService.this, pendingPkg,
-                                    pendingLabel, pendingUid);
+                            engine = new MonitorEngine(app, targetPkg, targetLabel, targetUid);
                         }
                         local = engine;
                     }
                     if (!local.isRunning()) {
-                        ActivityLogWriter.get().open(MonitorService.this, pendingPkg, pendingLabel);
+                        ActivityLogWriter.get().open(app, targetPkg, targetLabel);
                         local.start();
                     }
                     MonitorHub.get().publishState();
                     if (shouldLaunch) {
-                        launchTarget(pendingPkg);
+                        launchTarget(app, targetPkg);
                     }
                 } catch (Throwable error) {
                     // Monitoring must degrade, never crash: a sampler that cannot
                     // start is a diagnostics entry, not a dead application.
                     DiagnosticLog.recordProblem("Monitoring could not be started for "
-                            + pendingPkg, error);
+                            + targetPkg, error);
                     MonitorHub.get().publishState();
                 }
             }
@@ -178,17 +186,17 @@ public class MonitorService extends Service {
      * its start-up is part of the record. The launcher intent is tried first and
      * root {@code am start} is the fallback for apps without one.
      */
-    private void launchTarget(String pkg) {
+    private static void launchTarget(Context context, String pkg) {
         if (pkg == null || pkg.isEmpty()) {
             return;
         }
         boolean requested = false;
         try {
-            Intent launch = getPackageManager().getLaunchIntentForPackage(pkg);
+            Intent launch = context.getPackageManager().getLaunchIntentForPackage(pkg);
             if (launch != null) {
                 launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK
                         | Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED);
-                startActivity(launch);
+                context.startActivity(launch);
                 requested = true;
             }
         } catch (Throwable ignored) {
@@ -231,7 +239,7 @@ public class MonitorService extends Service {
     }
 
     /** Puts the launch in the activity feed and the record file. */
-    private void report(String pkg, String how) {
+    private static void report(String pkg, String how) {
         try {
             EventItem event = EventItem.of(EventCategory.ACTIVITY,
                     "Application launched by AppLens",
@@ -250,7 +258,7 @@ public class MonitorService extends Service {
      * activity start a service is not allowed to make, so the only way to know
      * whether the launch worked is to look at what is actually on screen.
      */
-    private boolean isTargetInFront(String pkg) {
+    private static boolean isTargetInFront(String pkg) {
         try {
             RootShell root = RootShell.get();
             if (!root.isRootGranted()) {
@@ -305,7 +313,6 @@ public class MonitorService extends Service {
     }
 
     private void teardown() {
-        pendingPkg = "";
         final MonitorEngine stopping;
         synchronized (engineLock) {
             stopping = engine;
@@ -318,26 +325,7 @@ public class MonitorService extends Service {
         // Stopping the samplers tears down root streams and firewall counters and
         // the final flush writes through root, so none of it may run on the main
         // thread; the service itself goes away immediately.
-        Thread closer = new Thread(new Runnable() {
-            @Override
-            public void run() {
-                try {
-                    if (stopping != null) {
-                        stopping.stop();
-                    }
-                } catch (Throwable error) {
-                    DiagnosticLog.recordProblem("Monitoring could not be stopped cleanly", error);
-                }
-                try {
-                    ActivityLogWriter.get().flush();
-                } catch (Throwable error) {
-                    DiagnosticLog.recordThrottledProblem("record-flush",
-                            "The activity record could not be flushed", error);
-                }
-            }
-        }, "applens-teardown");
-        closer.setDaemon(true);
-        closer.start();
+        closeSession(stopping);
         try {
             stopForeground(true);
         } catch (Throwable ignored) {
@@ -360,16 +348,46 @@ public class MonitorService extends Service {
         }
     }
 
+    /** Stops a session on the shared worker, ahead of whatever starts next. */
+    private static void closeSession(final MonitorEngine stopping) {
+        try {
+            bootstrap.execute(new Runnable() {
+                @Override
+                public void run() {
+                    try {
+                        if (stopping != null) {
+                            stopping.stop();
+                        }
+                    } catch (Throwable error) {
+                        DiagnosticLog.recordProblem("Monitoring could not be stopped cleanly", error);
+                    }
+                    try {
+                        ActivityLogWriter.get().flush();
+                    } catch (Throwable error) {
+                        DiagnosticLog.recordThrottledProblem("record-flush",
+                                "The activity record could not be flushed", error);
+                    }
+                }
+            });
+        } catch (Throwable error) {
+            DiagnosticLog.recordProblem("Monitoring could not be stopped cleanly", error);
+        }
+    }
+
     @Override
     public void onDestroy() {
-        bootstrap.shutdown();
+        // Android destroys the service as soon as stopSelf() is honoured, and that
+        // happens on the main thread — so the samplers are stopped on the worker,
+        // never here.
+        final MonitorEngine stopping;
         synchronized (engineLock) {
-            if (engine != null) {
-                engine.stop();
-                engine = null;
-            }
+            stopping = engine;
+            engine = null;
         }
-        MonitorHub.get().end();
+        if (stopping != null) {
+            closeSession(stopping);
+            MonitorHub.get().end();
+        }
         super.onDestroy();
     }
 
