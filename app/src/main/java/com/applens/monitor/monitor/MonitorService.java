@@ -16,6 +16,8 @@ import com.applens.monitor.core.Fmt;
 import com.applens.monitor.core.RootShell;
 import com.applens.monitor.log.ActivityLogWriter;
 import com.applens.monitor.log.DiagnosticLog;
+import com.applens.monitor.model.EventCategory;
+import com.applens.monitor.model.EventItem;
 import com.applens.monitor.ui.DetailActivity;
 
 /**
@@ -199,7 +201,8 @@ public class MonitorService extends Service {
                 Thread.currentThread().interrupt();
                 return;
             }
-            if (isTargetRunning(pkg)) {
+            if (isTargetInFront(pkg)) {
+                report(pkg, "launcher intent");
                 return;
             }
         }
@@ -214,25 +217,57 @@ public class MonitorService extends Service {
                 return;
             }
             if (root.statusOf("monkey -p " + RootShell.shQuote(pkg)
-                    + " -c android.intent.category.LAUNCHER 1 >/dev/null 2>&1") != 0) {
-                root.exec("am start -n \"$(cmd package resolve-activity --brief "
-                        + RootShell.shQuote(pkg) + " | tail -1)\" >/dev/null 2>&1", 10000);
+                    + " -c android.intent.category.LAUNCHER 1 >/dev/null 2>&1") == 0) {
+                report(pkg, "root monkey");
+                return;
             }
+            root.exec("am start -n \"$(cmd package resolve-activity --brief "
+                    + RootShell.shQuote(pkg) + " | tail -1)\" >/dev/null 2>&1", 10000);
+            report(pkg, "root am start");
         } catch (Throwable error) {
             DiagnosticLog.recordThrottledProblem("launch-target",
                     "Could not launch " + pkg, error);
         }
     }
 
-    private boolean isTargetRunning(String pkg) {
+    /** Puts the launch in the activity feed and the record file. */
+    private void report(String pkg, String how) {
+        try {
+            EventItem event = EventItem.of(EventCategory.ACTIVITY,
+                    "Application launched by AppLens",
+                    pkg + " was brought to the foreground after the monitors came up (" + how + ")",
+                    "MonitorService");
+            event.pkg = pkg;
+            MonitorHub.get().publish(event);
+            ActivityLogWriter.get().writeRaw(event.toLogLine(pkg));
+        } catch (Throwable ignored) {
+            // never let reporting break the launch
+        }
+    }
+
+    /**
+     * True when {@code pkg} owns the focused window. Android silently drops an
+     * activity start a service is not allowed to make, so the only way to know
+     * whether the launch worked is to look at what is actually on screen.
+     */
+    private boolean isTargetInFront(String pkg) {
         try {
             RootShell root = RootShell.get();
             if (!root.isRootGranted()) {
-                // Without root assume the launch worked rather than starting it twice.
+                // Without root nothing better can be attempted anyway.
                 return true;
             }
-            String pids = root.exec("pidof " + RootShell.shQuote(pkg) + " 2>/dev/null", 6000);
-            return pids != null && !pids.trim().isEmpty();
+            String focus = root.exec("dumpsys activity activities 2>/dev/null"
+                    + " | grep -m1 -E 'mResumedActivity|topResumedActivity'", 8000);
+            if (focus == null || focus.trim().isEmpty()) {
+                focus = root.exec("dumpsys window 2>/dev/null | grep -m1 mCurrentFocus", 8000);
+            }
+            if (focus == null || focus.trim().isEmpty()) {
+                // No answer: fall back to "is it running at all".
+                String pids = root.exec("pidof " + RootShell.shQuote(pkg) + " 2>/dev/null", 6000);
+                return pids != null && !pids.trim().isEmpty();
+            }
+            return focus.contains(pkg + "/");
         } catch (Throwable ignored) {
             return true;
         }
