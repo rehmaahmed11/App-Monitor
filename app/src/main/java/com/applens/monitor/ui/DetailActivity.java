@@ -166,9 +166,10 @@ public class DetailActivity extends Activity {
                     parsed.appOps.putAll(PackageFactsParser.parseAppOps(appOps));
                 }
                 if (loaded != null && installer.isEmpty()) {
-                    installer = Fmt.nz(RootShell.get().exec("cmd package list-packages -i "
-                            + RootShell.shQuote(pkg) + " 2>/dev/null | head -1")
-                            .replace("package:", "").trim(), "");
+                    String installerOutput = RootShell.get().exec("cmd package list-packages -i "
+                            + RootShell.shQuote(pkg) + " 2>/dev/null | head -1");
+                    installer = installerOutput == null ? ""
+                            : Fmt.nz(installerOutput.replace("package:", "").trim(), "");
                 }
             } else if (loaded != null) {
                 parsed = new AppFacts();
