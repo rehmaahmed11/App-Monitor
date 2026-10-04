@@ -23,6 +23,11 @@ public class ConnectionItem {
     public String interfaceName = "";
     public long txQueue;
     public long rxQueue;
+    public String localIp = "";
+
+    public String localIp() {
+        return localIp;
+    }
 
     public long duration() {
         return Math.max(0, lastSeen - firstSeen);

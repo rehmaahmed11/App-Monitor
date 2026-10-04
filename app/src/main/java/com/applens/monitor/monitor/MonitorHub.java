@@ -240,6 +240,10 @@ public final class MonitorHub {
     // Byte counters
     // ------------------------------------------------------------------
 
+    public synchronized void addSource(String source) {
+        live.addSource(source);
+    }
+
     public synchronized void setBytes(long up, long down, long upRate, long downRate, String source) {
         live.bytesUp = up;
         live.bytesDown = down;

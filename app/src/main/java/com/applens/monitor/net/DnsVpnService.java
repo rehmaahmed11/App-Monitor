@@ -9,6 +9,7 @@ import com.applens.monitor.log.ActivityLogWriter;
 import com.applens.monitor.model.DnsRecord;
 import com.applens.monitor.model.EventCategory;
 import com.applens.monitor.model.EventItem;
+import com.applens.monitor.monitor.DnsHostCache;
 import com.applens.monitor.monitor.MonitorHub;
 
 import java.io.FileInputStream;
@@ -335,6 +336,16 @@ public class DnsVpnService extends VpnService {
         }
         if (record.answers.isEmpty() && message.answers.isEmpty() && message.isResponse()) {
             record.answers.add("no answer");
+        }
+        for (DnsMessage.Record answer : message.answers) {
+            if (answer.data == null) {
+                continue;
+            }
+            if (answer.type == DnsMessage.TYPE_A) {
+                DnsHostCache.put(answer.data, domain);
+            } else if (answer.type == DnsMessage.TYPE_CNAME) {
+                DnsHostCache.put(answer.name, answer.data);
+            }
         }
         queryCount.incrementAndGet();
         QUERY_COUNTER.incrementAndGet();

@@ -69,6 +69,12 @@ public final class TcpdumpMonitor {
         if (gt < 0) {
             return;
         }
+        int ipIndex = line.indexOf("IP ");
+        String srcIp = ipIndex >= 0 ? line.substring(ipIndex + 3, gt).trim() : "";
+        int lastDot = srcIp.lastIndexOf('.');
+        if (lastDot > 0) {
+            srcIp = srcIp.substring(0, lastDot);
+        }
         String tail = line.substring(gt + 1);
         String domain = null;
         int aIndex = tail.indexOf(" A? ");
@@ -98,6 +104,7 @@ public final class TcpdumpMonitor {
         if (domain.isEmpty()) {
             return;
         }
+        DnsHostCache.put(srcIp, domain);
         DnsRecord record = new DnsRecord();
         record.time = System.currentTimeMillis();
         record.domain = domain;

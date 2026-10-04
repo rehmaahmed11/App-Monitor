@@ -151,6 +151,7 @@ public final class SocketMonitor {
                 item.remoteIp = s.remoteIp;
                 item.remotePort = s.remotePort;
                 item.localPort = s.localPort;
+                item.localIp = s.localIp;
                 item.firstSeen = now;
                 byKey.put(key, item);
             }

@@ -34,8 +34,21 @@ public class MonitorService extends Service {
 
     private static volatile MonitorEngine engine;
 
+    private final java.util.concurrent.ExecutorService bootstrap =
+            java.util.concurrent.Executors.newSingleThreadExecutor(runnable -> {
+                Thread t = new Thread(runnable, "applens-bootstrap");
+                t.setDaemon(true);
+                return t;
+            });
+
+    private final Object engineLock = new Object();
+    private volatile String pendingPkg = "";
+    private volatile String pendingLabel = "";
+    private volatile int pendingUid = -1;
+
     public static boolean isRunning() {
-        return engine != null && engine.isRunning();
+        MonitorEngine local = engine;
+        return local != null && local.isRunning();
     }
 
     public static void start(Context ctx, String pkg, String label, int uid, boolean useVpn) {
@@ -91,18 +104,33 @@ public class MonitorService extends Service {
             stopSelf();
             return START_NOT_STICKY;
         }
+        pendingPkg = pkg;
+        pendingLabel = label;
+        pendingUid = uid;
         startForegroundCompat(buildNotification(label, pkg));
-        if (engine == null) {
-            engine = new MonitorEngine(this, pkg, label, uid);
-        }
-        if (!engine.isRunning()) {
-            ActivityLogWriter.get().open(this, pkg, label);
-            engine.start();
-        }
         if (useVpn) {
             startVpn(pkg, label, uid);
         }
-        MonitorHub.get().publishState();
+        // Opening the record file and negotiating the root session spawns processes,
+        // so it must not happen on the service main thread.
+        bootstrap.execute(new Runnable() {
+            @Override
+            public void run() {
+                MonitorEngine local;
+                synchronized (engineLock) {
+                    if (engine == null) {
+                        engine = new MonitorEngine(MonitorService.this, pendingPkg,
+                                pendingLabel, pendingUid);
+                    }
+                    local = engine;
+                }
+                if (!local.isRunning()) {
+                    ActivityLogWriter.get().open(MonitorService.this, pendingPkg, pendingLabel);
+                    local.start();
+                }
+                MonitorHub.get().publishState();
+            }
+        });
         return START_STICKY;
     }
 
@@ -137,9 +165,12 @@ public class MonitorService extends Service {
     }
 
     private void teardown() {
-        if (engine != null) {
-            engine.stop();
-            engine = null;
+        pendingPkg = "";
+        synchronized (engineLock) {
+            if (engine != null) {
+                engine.stop();
+                engine = null;
+            }
         }
         Intent vpn = new Intent(this, com.applens.monitor.net.DnsVpnService.class);
         vpn.setAction(com.applens.monitor.net.DnsVpnService.ACTION_STOP);
@@ -157,9 +188,12 @@ public class MonitorService extends Service {
 
     @Override
     public void onDestroy() {
-        if (engine != null) {
-            engine.stop();
-            engine = null;
+        bootstrap.shutdown();
+        synchronized (engineLock) {
+            if (engine != null) {
+                engine.stop();
+                engine = null;
+            }
         }
         MonitorHub.get().end();
         super.onDestroy();

@@ -7,6 +7,7 @@ import android.widget.TextView;
 import com.applens.monitor.R;
 import com.applens.monitor.core.Fmt;
 import com.applens.monitor.model.ConnectionItem;
+import com.applens.monitor.monitor.DnsHostCache;
 import com.applens.monitor.monitor.MonitorHub;
 import com.applens.monitor.monitor.MonitorService;
 import com.applens.monitor.monitor.MonitorState;
@@ -93,6 +94,10 @@ public class NetworkTab extends TabPage {
                 state.bytesDown < 0 ? "n/a" : Fmt.bytes(state.bytesDown), R.color.accent2));
         header.addView(UiKit.keyValue(host, "Counter source",
                 Fmt.nz(state.byteSource, "not sampling"), R.color.text_dim));
+        boolean perFlow = state.sources.contains("tcpdump-flows");
+        header.addView(UiKit.keyValue(host, "Per-connection bytes",
+                perFlow ? "tcpdump flow accounting" : "per-uid totals only",
+                perFlow ? R.color.ok : R.color.text_dim));
         header.addView(UiKit.keyValue(host, "Active connections",
                 String.valueOf(state.connectionCount), R.color.text));
         header.addView(UiKit.keyValue(host, "DNS queries",
@@ -150,22 +155,26 @@ public class NetworkTab extends TabPage {
 
     private Row toRow(ConnectionItem item) {
         Row row = new Row();
-        row.iconRes = "UDP".equals(item.proto) ? R.drawable.ic_network : R.drawable.ic_dns;
+        row.iconRes = item.proto.startsWith("UDP") ? R.drawable.ic_network : R.drawable.ic_dns;
         row.colorRes = item.active ? R.color.accent : R.color.muted_2;
-        String host = item.remoteHost == null || item.remoteHost.isEmpty()
-                ? item.remoteIp : item.remoteHost;
+        String host = DnsHostCache.reverseOrSelf(
+                item.remoteHost == null || item.remoteHost.isEmpty()
+                        ? item.remoteIp : item.remoteHost);
         row.title = host + (item.remotePort > 0 ? ":" + item.remotePort : "");
         StringBuilder sub = new StringBuilder();
         sub.append(item.proto).append(' ').append(item.stateLabel());
         if (item.localPort > 0) {
             sub.append(" · local :").append(item.localPort);
         }
-        if (!item.network.isEmpty()) {
-            sub.append(" · ").append(item.network);
+        if (item.txQueue > 0 || item.rxQueue > 0) {
+            sub.append(" · queued ").append(Fmt.bytesShort(item.txQueue + item.rxQueue));
+        }
+        if (host.equals(item.remoteIp)) {
+            sub.append(" · ").append(item.remoteIp);
         }
         row.subtitle = sub.toString();
         row.time = Fmt.hms(item.lastSeen);
-        if (item.bytesUp >= 0 || item.bytesDown >= 0) {
+        if (item.bytesUp > 0 || item.bytesDown > 0) {
             row.meta = "↑ " + Fmt.bytesShort(item.bytesUp) + "  ↓ " + Fmt.bytesShort(item.bytesDown);
         } else {
             row.meta = "active " + Fmt.duration(item.duration());

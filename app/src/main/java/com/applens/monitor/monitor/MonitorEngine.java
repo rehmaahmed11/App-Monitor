@@ -51,6 +51,8 @@ public final class MonitorEngine {
     private TcpdumpMonitor tcpdump;
     private SocketMonitor socketMonitor;
     private ByteCounter byteCounter;
+    private TcpdumpFlowMonitor flowMonitor;
+    private final Map<String, ConnectionItem> byFlowKey = new HashMap<>();
 
     public MonitorEngine(Context context, String pkg, String label, int uid) {
         this.context = context.getApplicationContext();
@@ -77,7 +79,7 @@ public final class MonitorEngine {
 
         if (RootShell.get().ensureRoot()) {
             byteCounter.install();
-            hub.stateSnapshot().addSource("byte:" + byteCounter.source());
+            hub.addSource("byte:" + byteCounter.source());
         }
 
         logcatMonitor = new LogcatMonitor(pkg, new LogcatMonitor.ActivitySink() {
@@ -88,7 +90,7 @@ public final class MonitorEngine {
         });
         if (logcatMonitor.isSupported()) {
             logcatMonitor.start();
-            hub.stateSnapshot().addSource("logcat");
+            hub.addSource("logcat");
         }
 
         fileWatch = new FileWatchMonitor(pkg, dataDir(), new FileWatchMonitor.ActivitySink() {
@@ -99,15 +101,19 @@ public final class MonitorEngine {
         });
         if (fileWatch.isSupported()) {
             fileWatch.start();
-            hub.stateSnapshot().addSource("inotifyd");
+            hub.addSource("inotifyd");
         }
 
         if (com.applens.monitor.net.DnsVpnService.isRunning()) {
-            hub.stateSnapshot().addSource("vpn-dns");
-        } else if (RootShell.get().tcpdump() != null) {
+            hub.addSource("vpn-dns");
+        }
+        if (RootShell.get().tcpdump() != null) {
             tcpdump = new TcpdumpMonitor(pkg);
             tcpdump.start();
-            hub.stateSnapshot().addSource("tcpdump");
+            hub.addSource("tcpdump");
+            flowMonitor = new TcpdumpFlowMonitor();
+            flowMonitor.start(this::onPacket);
+            hub.addSource("tcpdump-flows");
         }
 
         scheduler = Executors.newScheduledThreadPool(3, runnable -> {
@@ -141,6 +147,9 @@ public final class MonitorEngine {
         }
         if (tcpdump != null) {
             tcpdump.stop();
+        }
+        if (flowMonitor != null) {
+            flowMonitor.stop();
         }
         if (byteCounter != null) {
             byteCounter.uninstall();
@@ -244,6 +253,8 @@ public final class MonitorEngine {
                 }
                 attachDnsLabel(item);
                 hub.upsertConnection(item);
+                byFlowKey.put(flowKey(item.proto, item.localIp(), item.localPort,
+                        item.remoteIp, item.remotePort), item);
             }
             for (String key : new HashSet<>(knownConnections)) {
                 if (!live.contains(key)) {
@@ -260,9 +271,41 @@ public final class MonitorEngine {
         if (item.remoteHost != null && !item.remoteHost.isEmpty()) {
             return;
         }
-        ConnectionItem known = hub.connectionByRemoteIp(item.remoteIp);
-        if (known != null && known != item && known.remoteHost != null) {
-            item.remoteHost = known.remoteHost;
+        String host = DnsHostCache.host(item.remoteIp);
+        if (host != null) {
+            item.remoteHost = host;
+            item.dnsQueries = 1;
+        }
+    }
+
+    private static String flowKey(String proto, String localIp, int localPort,
+                                  String remoteIp, int remotePort) {
+        return proto + "|" + localIp + ":" + localPort + ">" + remoteIp + ":" + remotePort;
+    }
+
+    /** Applies a captured packet to the matching connection's byte counters. */
+    private void onPacket(String localIp, int localPort, String remoteIp, int remotePort,
+                          String proto, int bytes, boolean outbound) {
+        String key = flowKey(proto, localIp, localPort, remoteIp, remotePort);
+        ConnectionItem item = byFlowKey.get(key);
+        if (item == null) {
+            item = byFlowKey.get(flowKey(proto, remoteIp, remotePort, localIp, localPort));
+            if (item == null) {
+                return;
+            }
+        }
+        synchronized (item) {
+            if (item.bytesUp < 0) {
+                item.bytesUp = 0;
+            }
+            if (item.bytesDown < 0) {
+                item.bytesDown = 0;
+            }
+            if (outbound) {
+                item.bytesUp += bytes;
+            } else {
+                item.bytesDown += bytes;
+            }
         }
     }
 
