@@ -645,7 +645,7 @@ public class DnsVpnService extends VpnService {
     }
 
     /** Parses DNS messages out of a TCP framed stream for logging purposes. */
-    static final class DnsRelayState {
+    final class DnsRelayState {
         final String transport;
         final int localPort;
         final int remotePort;

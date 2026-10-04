@@ -43,7 +43,7 @@ public class ActivityTab extends TabPage {
 
     @Override
     protected void onBuild() {
-        addSearch("Filter events…", this::refresh);
+        addSearch("Filter events…", this::onRefresh);
         String[] labels = new String[QUICK.length];
         for (int i = 0; i < QUICK.length; i++) {
             labels[i] = QUICK[i] == EventCategory.ALL

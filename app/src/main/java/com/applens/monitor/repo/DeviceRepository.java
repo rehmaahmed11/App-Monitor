@@ -315,7 +315,9 @@ public final class DeviceRepository {
         p.add(H, R.drawable.ic_chip, "Locale", Locale.getDefault().toString());
         boolean multiUser = false;
         try {
-            multiUser = android.os.UserManager.get(ctx).getUserProfiles().size() > 1;
+            android.os.UserManager um =
+                    (android.os.UserManager) ctx.getSystemService(Context.USER_SERVICE);
+            multiUser = um != null && um.getUserProfiles().size() > 1;
         } catch (Throwable ignored) {
             // noop
         }

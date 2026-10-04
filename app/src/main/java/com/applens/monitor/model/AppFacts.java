@@ -10,7 +10,7 @@ public class AppFacts {
 
     public String pkg = "";
     public int uid = -1;
-    public int versionCode;
+    public long versionCode;
     public String versionName = "";
     public int targetSdk;
     public int minSdk;

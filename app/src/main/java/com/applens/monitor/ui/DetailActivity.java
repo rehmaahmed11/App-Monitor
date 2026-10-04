@@ -4,6 +4,7 @@ import android.app.Activity;
 import android.content.Intent;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageInfo;
+import android.content.pm.PackageManager;
 import android.net.VpnService;
 import android.os.Bundle;
 import android.os.Handler;
@@ -144,7 +145,7 @@ public class DetailActivity extends Activity {
             AppItem loaded = null;
             try {
                 PackageManager pm = getPackageManager();
-                PackageInfo info = pm.getPackageInfo(pkg, android.content.pm.PackageManager.GET_PERMISSIONS);
+                PackageInfo info = pm.getPackageInfo(pkg, PackageManager.GET_PERMISSIONS);
                 loaded = AppItem.from(this, info);
             } catch (Throwable ignored) {
                 loaded = null;
