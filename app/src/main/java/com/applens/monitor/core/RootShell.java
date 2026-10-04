@@ -2,6 +2,8 @@ package com.applens.monitor.core;
 
 import android.util.Log;
 
+import com.applens.monitor.log.DiagnosticLog;
+
 import java.io.BufferedReader;
 import java.io.ByteArrayOutputStream;
 import java.io.Closeable;
@@ -179,6 +181,7 @@ public final class RootShell {
             rootGranted = false;
             lastError = String.valueOf(t.getMessage());
             Log.w(TAG, "root negotiation failed", t);
+            DiagnosticLog.recordProblem("Root access negotiation failed", t);
         } finally {
             checking.set(false);
         }
@@ -348,6 +351,7 @@ public final class RootShell {
             if (p != null) {
                 destroy(p);
             }
+            DiagnosticLog.recordThrottledProblem("root-command", "Root command failed to start", t);
             return null;
         }
     }
@@ -443,6 +447,7 @@ public final class RootShell {
             return proc;
         } catch (Throwable t) {
             lastError = String.valueOf(t.getMessage());
+            DiagnosticLog.recordThrottledProblem("root-stream", "Unable to start a root monitoring stream", t);
             return null;
         }
     }

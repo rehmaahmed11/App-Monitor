@@ -6,6 +6,7 @@ import android.content.pm.PackageManager;
 
 import com.applens.monitor.core.Fmt;
 import com.applens.monitor.core.RootShell;
+import com.applens.monitor.log.DiagnosticLog;
 import com.applens.monitor.model.AppItem;
 import com.applens.monitor.model.PermissionItem;
 
@@ -37,6 +38,7 @@ public final class AppRepository {
         try {
             packages = pm.getInstalledPackages(PackageManager.GET_PERMISSIONS);
         } catch (Throwable t) {
+            DiagnosticLog.recordProblem("Installed-app scan failed", t);
             packages = new ArrayList<>();
         }
         List<AppItem> out = new ArrayList<>(packages.size());
@@ -53,8 +55,10 @@ public final class AppRepository {
                 }
                 applyPermissionFlags(item, info);
                 out.add(item);
-            } catch (Throwable ignored) {
-                // skip broken package entries
+            } catch (Throwable error) {
+                // Skip the broken entry, but retain one diagnostic if this keeps happening.
+                DiagnosticLog.recordThrottledProblem("package-entry",
+                        "Could not read one installed-app entry", error);
             }
         }
         Collections.sort(out, AppItem.BY_NAME);

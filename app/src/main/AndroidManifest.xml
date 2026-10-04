@@ -71,6 +71,12 @@
             android:parentActivityName=".ui.MainActivity"
             android:configChanges="orientation|screenSize|keyboardHidden|uiMode" />
 
+        <activity
+            android:name=".ui.DiagnosticsActivity"
+            android:exported="false"
+            android:parentActivityName=".ui.MainActivity"
+            android:configChanges="orientation|screenSize|keyboardHidden|uiMode" />
+
         <service
             android:name=".monitor.MonitorService"
             android:exported="false"

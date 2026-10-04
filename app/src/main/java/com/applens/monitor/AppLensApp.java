@@ -4,6 +4,7 @@ import android.app.Application;
 
 import com.applens.monitor.core.Prefs;
 import com.applens.monitor.core.RootShell;
+import com.applens.monitor.log.DiagnosticLog;
 
 /**
  * Application entry point. Boots the shared preferences store and kicks off the
@@ -14,7 +15,9 @@ public class AppLensApp extends Application {
     @Override
     public void onCreate() {
         super.onCreate();
+        DiagnosticLog.init(this);
         Prefs.init(this);
+        DiagnosticLog.inspectPreviousProcessExit(this);
         Thread root = new Thread(new Runnable() {
             @Override
             public void run() {
