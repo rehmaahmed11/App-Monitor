@@ -58,7 +58,7 @@ public class ActivityTab extends TabPage {
             } else {
                 active.add(category);
             }
-            refresh();
+            onRefresh();
         });
         adapter = new Row.Adapter(host);
         useList(adapter);
