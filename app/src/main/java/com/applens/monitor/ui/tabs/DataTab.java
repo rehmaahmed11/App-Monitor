@@ -23,6 +23,7 @@ public class DataTab extends TabPage {
     private LinearLayout legend;
     private LinearLayout summaryCard;
     private boolean loading;
+    private long lastScanAt;
 
     public DataTab(DetailActivity host) {
         super(host);
@@ -44,6 +45,11 @@ public class DataTab extends TabPage {
         if (container == null || loading) {
             return;
         }
+        long now = System.currentTimeMillis();
+        if (now - lastScanAt < 20000) {
+            return;
+        }
+        lastScanAt = now;
         AppItem app = host.app();
         String dataDir = app != null ? app.dataDir : "/data/user/0/" + host.pkg();
         if (app == null && host.facts() != null && !host.facts().dataDir.isEmpty()) {

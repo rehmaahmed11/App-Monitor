@@ -45,6 +45,7 @@ public class NetworkTab extends TabPage {
     @Override
     protected void onBuild() {
         addSearch("Filter host, IP or port…", this::onRefresh);
+        ensureCharts();
         header = UiKit.card(host);
         root.addView(header);
         adapter = new Row.Adapter(host);
@@ -60,6 +61,16 @@ public class NetworkTab extends TabPage {
         renderList();
     }
 
+    private void ensureCharts() {
+        if (upChart != null) {
+            return;
+        }
+        upChart = new SparklineView(host);
+        upChart.setColor(UiKit.color(host, R.color.accent));
+        downChart = new SparklineView(host);
+        downChart.setColor(UiKit.color(host, R.color.accent2));
+    }
+
     private void renderHeader() {
         header.removeAllViews();
         MonitorState state = MonitorHub.get().stateSnapshot();
@@ -67,15 +78,11 @@ public class NetworkTab extends TabPage {
 
         header.addView(UiKit.text(host, "THROUGHPUT", 10, R.color.muted));
 
-        upChart = new SparklineView(host);
-        upChart.setColor(UiKit.color(host, R.color.accent));
+        ensureCharts();
         LinearLayout.LayoutParams chartLp = new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, UiKit.dp(host, 58));
         chartLp.bottomMargin = UiKit.dp(host, 6);
         header.addView(upChart, chartLp);
-
-        downChart = new SparklineView(host);
-        downChart.setColor(UiKit.color(host, R.color.accent2));
         header.addView(downChart, chartLp);
 
         long now = System.currentTimeMillis();

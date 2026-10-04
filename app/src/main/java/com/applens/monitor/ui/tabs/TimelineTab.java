@@ -72,7 +72,7 @@ public class TimelineTab extends TabPage {
 
     @Override
     public void onEvent(EventItem event) {
-        if (host.pkg().equals(MonitorHub.get().pkg)) {
+        if (host.pkg().equals(MonitorHub.get().pkg) && allowEventRefresh()) {
             onRefresh();
         }
     }

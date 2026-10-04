@@ -38,6 +38,17 @@ public abstract class TabPage {
     private boolean built;
     private LinearLayout toolbar;
     private TextView searchField;
+    private long lastEventRefresh;
+
+    /** Rate limiter for event bursts: returns true at most 4x per second. */
+    protected boolean allowEventRefresh() {
+        long now = android.os.SystemClock.uptimeMillis();
+        if (now - lastEventRefresh < 250) {
+            return false;
+        }
+        lastEventRefresh = now;
+        return true;
+    }
 
     protected TabPage(DetailActivity host) {
         this.host = host;
