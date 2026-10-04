@@ -34,11 +34,15 @@ public final class RootShell {
             "/sbin/su",
             "/su/bin/su",
             "/debug_ramdisk/su",
-            "/system/bin/magisk",
     };
 
     /** Maximum stdout/stderr we ever buffer for a single command (8 MiB). */
     private static final int MAX_OUTPUT = 8 * 1024 * 1024;
+    private static final int ROOT_REQUEST_TIMEOUT_MS = 60000;
+
+    private enum SuAttempt {
+        GRANTED, REJECTED, UNAVAILABLE
+    }
 
     private static volatile RootShell instance;
 
@@ -46,6 +50,7 @@ public final class RootShell {
     private final CopyOnWriteArrayList<String> extraPaths = new CopyOnWriteArrayList<>();
 
     private volatile boolean rootGranted;
+    private volatile boolean rootAttempted;
     private volatile String workingSu = "";
     private volatile String manager = "Unknown";
     private volatile String lastError = "";
@@ -81,6 +86,11 @@ public final class RootShell {
         return rootGranted;
     }
 
+    /** True while waiting for the superuser manager to answer a root request. */
+    public boolean isRootChecking() {
+        return checking.get();
+    }
+
     public String suPath() {
         return workingSu;
     }
@@ -99,33 +109,74 @@ public final class RootShell {
      * which is what makes the "grant once, works forever" behaviour of Magisk /
      * KernelSU apply here.
      */
-    public boolean ensureRoot() {
+    public synchronized boolean ensureRoot() {
+        return ensureRootLocked(false);
+    }
+
+    /** Explicit retry used when the user taps the root-status chip. */
+    public synchronized boolean requestRootAccess() {
+        return ensureRootLocked(true);
+    }
+
+    private boolean ensureRootLocked(boolean forceRetry) {
         if (rootGranted) {
             return true;
         }
-        if (!checking.compareAndSet(false, true)) {
-            return rootGranted;
+        // Cache the result so scans do not repeatedly trigger superuser prompts.
+        // An explicit tap can retry after the user changes the Magisk policy.
+        if (rootAttempted && !forceRetry) {
+            return false;
         }
+        rootAttempted = true;
+        // Other callers wait here instead of seeing a stale "denied" result while
+        // a permission prompt is still open on another thread.
+        checking.set(true);
         try {
-            for (String candidate : SU_CANDIDATES) {
-                for (String extra : extraPaths) {
-                    if (trySu(candidate)) {
-                        return true;
-                    }
-                }
-                if (trySu(candidate)) {
+            String savedPath = Prefs.str(Prefs.K_ROOT_PATH, "");
+            if (savedPath != null && !savedPath.trim().isEmpty()) {
+                SuAttempt attempt = trySu(savedPath.trim());
+                if (attempt == SuAttempt.GRANTED) {
                     return true;
+                }
+                if (attempt == SuAttempt.REJECTED) {
+                    return false;
+                }
+            }
+            for (String extra : extraPaths) {
+                SuAttempt attempt = trySu(extra);
+                if (attempt == SuAttempt.GRANTED) {
+                    return true;
+                }
+                if (attempt == SuAttempt.REJECTED) {
+                    return false;
+                }
+            }
+            for (String candidate : SU_CANDIDATES) {
+                if (candidate.equals(savedPath) || extraPaths.contains(candidate)) {
+                    continue;
+                }
+                SuAttempt attempt = trySu(candidate);
+                if (attempt == SuAttempt.GRANTED) {
+                    return true;
+                }
+                if (attempt == SuAttempt.REJECTED) {
+                    return false;
                 }
             }
             // Some KernelSU / APatch builds only expose su through a helper.
             for (String candidate : new String[]{"magisk su", "ksud su", "apd su"}) {
-                if (trySu(candidate)) {
+                SuAttempt attempt = trySu(candidate);
+                if (attempt == SuAttempt.GRANTED) {
                     return true;
+                }
+                if (attempt == SuAttempt.REJECTED) {
+                    return false;
                 }
             }
             rootGranted = false;
             lastError = "No su binary responded";
         } catch (Throwable t) {
+            rootGranted = false;
             lastError = String.valueOf(t.getMessage());
             Log.w(TAG, "root negotiation failed", t);
         } finally {
@@ -134,25 +185,46 @@ public final class RootShell {
         return rootGranted;
     }
 
-    private boolean trySu(String candidate) {
+    private SuAttempt trySu(String candidate) {
+        if (!isSuAvailable(candidate)) {
+            return SuAttempt.UNAVAILABLE;
+        }
         try {
-            String out = runSu(candidate, "id -u", 6000);
-            if (out != null && out.trim().contains("uid=0")) {
+            // `su -c id -u` prints exactly `0` when elevated. Allow enough time for
+            // Magisk/KernelSU/APatch's first-time authorization dialog to be answered.
+            String out = runSu(candidate, "id -u", ROOT_REQUEST_TIMEOUT_MS);
+            if (out == null) {
+                // The executable was present but did not answer in time. Do not try
+                // another alias and accidentally open a second authorization prompt.
+                lastError = "Superuser request timed out";
+                return SuAttempt.REJECTED;
+            }
+            String identity = out.trim();
+            if ("0".equals(identity) || identity.startsWith("uid=0(")) {
                 workingSu = candidate;
                 rootGranted = true;
                 lastError = "";
                 Prefs.put(Prefs.K_ROOT_PATH, candidate);
-                return true;
+                return SuAttempt.GRANTED;
             }
-            if (out != null && out.contains("uid=0")) {
-                workingSu = candidate;
-                rootGranted = true;
-                return true;
-            }
+            lastError = "Superuser access was not granted";
+            return SuAttempt.REJECTED;
         } catch (Throwable ignored) {
-            // try the next candidate
+            return SuAttempt.UNAVAILABLE;
         }
-        return false;
+    }
+
+    private boolean isSuAvailable(String candidate) {
+        if (candidate == null || candidate.trim().isEmpty()) {
+            return false;
+        }
+        String executable = candidate.trim().split("\\s+")[0];
+        if (executable.contains("/")) {
+            java.io.File file = new java.io.File(executable);
+            return file.isFile() && file.canExecute();
+        }
+        String found = plainCommand("command -v " + shQuote(executable) + " 2>/dev/null", 2000);
+        return found != null && !found.trim().isEmpty();
     }
 
     /** Registers an extra {@code su} location discovered on the device. */

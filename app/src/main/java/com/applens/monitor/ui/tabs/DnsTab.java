@@ -130,6 +130,11 @@ public class DnsTab extends TabPage {
 
     @Override
     public void onData() {
-        onRefresh();
+        // DetailActivity broadcasts package-data updates to every tab, including
+        // tabs that have not been opened yet. Do not render until onBuild() has
+        // initialized the header and adapter.
+        if (header != null && adapter != null) {
+            onRefresh();
+        }
     }
 }

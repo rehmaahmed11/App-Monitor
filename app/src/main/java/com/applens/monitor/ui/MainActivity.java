@@ -48,6 +48,11 @@ public class MainActivity extends Activity {
         t.setDaemon(true);
         return t;
     });
+    private final ExecutorService rootIo = Executors.newSingleThreadExecutor(runnable -> {
+        Thread t = new Thread(runnable, "applens-root-check");
+        t.setDaemon(true);
+        return t;
+    });
     private final AtomicBoolean scanning = new AtomicBoolean(false);
 
     private final List<AppItem> all = new ArrayList<>();
@@ -162,14 +167,22 @@ public class MainActivity extends Activity {
 
     private void requestRoot(final boolean userInitiated) {
         rootChip.setText("ROOT …");
-        io.execute(() -> {
-            boolean granted = RootShell.get().ensureRoot();
+        rootChip.setTextColor(UiKit.color(this, R.color.accent));
+        rootChip.setBackground(UiKit.pill(UiKit.color(this, R.color.accent_dim),
+                UiKit.dp(this, 20)));
+        rootIo.execute(() -> {
+            RootShell root = RootShell.get();
+            boolean granted = userInitiated ? root.requestRootAccess() : root.ensureRoot();
             main.post(() -> {
+                if (isFinishing() || isDestroyed()) {
+                    return;
+                }
                 updateRootChip();
                 if (userInitiated) {
                     Toast.makeText(this, granted
-                                    ? "Root granted via " + RootShell.get().suPath()
-                                    : "Root denied. AppLens needs root to read other apps.",
+                                    ? "Root granted via " + root.suPath()
+                                    : "Root access not granted. Allow AppLens in Magisk Superuser, "
+                                            + "then tap ROOT to retry.",
                             Toast.LENGTH_LONG).show();
                 }
                 if (granted && all.isEmpty()) {
@@ -180,12 +193,15 @@ public class MainActivity extends Activity {
     }
 
     private void updateRootChip() {
-        boolean granted = RootShell.get().isRootGranted();
-        rootChip.setText(granted ? "ROOT ✓" : "NO ROOT");
-        rootChip.setTextColor(UiKit.color(this, granted ? R.color.ok : R.color.danger));
-        rootChip.setBackground(UiKit.pill(
-                UiKit.color(this, granted ? R.color.ok_dim : R.color.danger_dim),
-                UiKit.dp(this, 20)));
+        RootShell root = RootShell.get();
+        boolean checking = root.isRootChecking();
+        boolean granted = root.isRootGranted();
+        rootChip.setText(granted ? "ROOT ✓" : checking ? "ROOT …" : "NO ROOT");
+        int color = granted ? R.color.ok : checking ? R.color.accent : R.color.danger;
+        int background = granted ? R.color.ok_dim
+                : checking ? R.color.accent_dim : R.color.danger_dim;
+        rootChip.setTextColor(UiKit.color(this, color));
+        rootChip.setBackground(UiKit.pill(UiKit.color(this, background), UiKit.dp(this, 20)));
         rootChip.setPadding(UiKit.dp(this, 12), UiKit.dp(this, 8),
                 UiKit.dp(this, 12), UiKit.dp(this, 8));
     }
@@ -385,5 +401,8 @@ public class MainActivity extends Activity {
     protected void onDestroy() {
         super.onDestroy();
         io.shutdownNow();
+        // Let an in-flight superuser prompt finish; interrupting it would turn an
+        // unanswered Magisk dialog into a false denial.
+        rootIo.shutdown();
     }
 }
