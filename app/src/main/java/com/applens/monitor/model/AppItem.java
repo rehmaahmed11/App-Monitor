@@ -93,13 +93,8 @@ public class AppItem {
         item.minSdk = ai != null ? ai.minSdkVersion : 0;
         item.enabled = ai == null || ai.enabled;
         try {
-            if (android.os.Build.VERSION.SDK_INT >= 28) {
-                item.firstInstall = info.getLongInstallTime();
-                item.lastUpdate = info.getLongUpdateTime();
-            } else {
-                item.firstInstall = info.firstInstallTime;
-                item.lastUpdate = info.lastUpdateTime;
-            }
+            item.firstInstall = info.firstInstallTime;
+            item.lastUpdate = info.lastUpdateTime;
         } catch (Throwable ignored) {
             // not available on every build
         }

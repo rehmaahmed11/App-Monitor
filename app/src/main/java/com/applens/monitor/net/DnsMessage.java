@@ -20,6 +20,9 @@ public final class DnsMessage {
     public static final int TYPE_HTTPS = 65;
     public static final int TYPE_ANY = 255;
 
+    private DnsMessage() {
+    }
+
     public static final class Question {
         public String name = "";
         public int type;
@@ -34,55 +37,31 @@ public final class DnsMessage {
         public String data = "";
     }
 
-    public int id;
-    public int flags;
-    public int qdCount;
-    public int anCount;
-    public int nsCount;
-    public int arCount;
-    public final List<Question> questions = new ArrayList<>();
-    public final List<Record> answers = new ArrayList<>();
+    /** A parsed DNS message: header plus the question and answer sections. */
+    public static final class Message {
+        public int id;
+        public int flags;
+        public int qdCount;
+        public int anCount;
+        public int nsCount;
+        public int arCount;
+        public final List<Question> questions = new ArrayList<>();
+        public final List<Record> answers = new ArrayList<>();
 
-    public boolean isResponse() {
-        return (flags & 0x8000) != 0;
-    }
-
-    public int rcode() {
-        return flags & 0x000F;
-    }
-
-    public int truncated() {
-        return (flags & 0x0200) != 0 ? 1 : 0;
-    }
-
-    public Question primary() {
-        return questions.isEmpty() ? null : questions.get(0);
-    }
-
-    /** Builds a TC=1 response containing only the question, used when a UDP answer will not fit. */
-    public static byte[] truncate(byte[] message, int offset, int length) {
-        if (message == null || length < 12) {
-            return null;
+        public boolean isResponse() {
+            return (flags & 0x8000) != 0;
         }
-        try {
-            Message m = parse(message, offset, length);
-            ByteArrayOutputStream out = new ByteArrayOutputStream();
-            writeShort(out, m.id);
-            int flags = (m.flags | 0x0200) & 0xFFFF;
-            writeShort(out, flags);
-            Question q = m.primary();
-            writeShort(out, q == null ? 0 : 1);
-            writeShort(out, 0);
-            writeShort(out, 0);
-            writeShort(out, 0);
-            if (q != null) {
-                writeName(out, q.name);
-                writeShort(out, q.type);
-                writeShort(out, q.clazz);
-            }
-            return out.toByteArray();
-        } catch (Throwable t) {
-            return null;
+
+        public int rcode() {
+            return flags & 0x000F;
+        }
+
+        public boolean truncated() {
+            return (flags & 0x0200) != 0;
+        }
+
+        public Question primary() {
+            return questions.isEmpty() ? null : questions.get(0);
         }
     }
 
@@ -113,6 +92,32 @@ public final class DnsMessage {
                 return "ANY";
             default:
                 return "TYPE" + type;
+        }
+    }
+
+    /** Builds a TC=1 response containing only the question, used when a UDP answer will not fit. */
+    public static byte[] truncate(byte[] message, int offset, int length) {
+        if (message == null || length < 12) {
+            return null;
+        }
+        try {
+            Message m = parse(message, offset, length);
+            ByteArrayOutputStream out = new ByteArrayOutputStream();
+            writeShort(out, m.id);
+            writeShort(out, (m.flags | 0x0200) & 0xFFFF);
+            Question q = m.primary();
+            writeShort(out, q == null ? 0 : 1);
+            writeShort(out, 0);
+            writeShort(out, 0);
+            writeShort(out, 0);
+            if (q != null) {
+                writeName(out, q.name);
+                writeShort(out, q.type);
+                writeShort(out, q.clazz);
+            }
+            return out.toByteArray();
+        } catch (Throwable t) {
+            return null;
         }
     }
 
@@ -186,7 +191,8 @@ public final class DnsMessage {
                             if (i > 0) {
                                 sb.append(':');
                             }
-                            sb.append(Integer.toHexString(((buf[p + i] & 0xFF) << 8) | (buf[p + i + 1] & 0xFF)));
+                            sb.append(Integer.toHexString(((buf[p + i] & 0xFF) << 8)
+                                    | (buf[p + i + 1] & 0xFF)));
                         }
                         return sb.toString();
                     }
@@ -205,7 +211,7 @@ public final class DnsMessage {
                         if (pos + 1 + l > p + len) {
                             break;
                         }
-                        sb.append(new String(buf, pos + 1, l));
+                        sb.append(new String(buf, pos + 1, l, "US-ASCII"));
                         pos += 1 + l;
                     }
                     return sb.toString();

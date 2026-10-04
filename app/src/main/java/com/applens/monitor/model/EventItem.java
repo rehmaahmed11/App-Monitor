@@ -36,7 +36,7 @@ public class EventItem {
     public String toLogLine(String appPkg) {
         StringBuilder sb = new StringBuilder();
         sb.append(Fmt.clock(time)).append("  ");
-        sb.append("[").append(category.name).append("] ");
+        sb.append("[").append(category.name()).append("] ");
         sb.append(title);
         if (!detail.isEmpty()) {
             sb.append(" — ").append(Fmt.limit(detail, 400));

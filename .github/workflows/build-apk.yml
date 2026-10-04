@@ -107,6 +107,9 @@ jobs:
                 file=$(printf '%s' "$line" | sed -E 's/^([^:]+):.*/\1/')
                 lineno=$(printf '%s' "$line" | sed -E 's/^[^:]+: ?([0-9]+):.*/\1/')
                 msg=$(printf '%s' "$line" | sed -E 's/^[^:]+: ?[0-9]+: (error|warning): //')
+                extra=$(grep -A3 -F "$line" build-log.txt | tail -n +2 \
+                        | grep -E 'symbol:|location:' | tr '\n' ' ' | cut -c1-200)
+                if [ -n "$extra" ]; then msg="$msg | $extra"; fi
                 if printf '%s' "$line" | grep -q ": error:"; then kind=error; else kind=warning; fi
                 echo "::${kind} file=${file},line=${lineno},title=javac::${msg}"
               done

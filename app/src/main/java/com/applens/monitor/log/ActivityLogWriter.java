@@ -106,7 +106,7 @@ public final class ActivityLogWriter {
         return path();
     }
 
-    private File externalBase(Context ctx, String safePkg) {
+    private static File externalBase(Context ctx, String safePkg) {
         try {
             File root = Environment.getExternalStorageDirectory();
             if (root != null && Environment.isExternalStorageManager()) {

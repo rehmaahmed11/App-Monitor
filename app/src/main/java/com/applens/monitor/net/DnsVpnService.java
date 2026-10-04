@@ -505,7 +505,6 @@ public class DnsVpnService extends VpnService {
             public void run() {
                 try {
                     ServerSocket server = new ServerSocket(port);
-                    protect(server);
                     if (port == RELAY_TCP53) {
                         tcpRelay = server;
                     } else {
@@ -605,7 +604,7 @@ public class DnsVpnService extends VpnService {
         return fallback;
     }
 
-    private void closeQuietly(Socket s) {
+    private void closeQuietly(java.io.Closeable s) {
         if (s != null) {
             try {
                 s.close();
