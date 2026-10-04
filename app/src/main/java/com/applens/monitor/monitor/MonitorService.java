@@ -90,6 +90,13 @@ public class MonitorService extends Service {
     private final Runnable ticker = new Runnable() {
         @Override
         public void run() {
+            // Keep the record size in the shared state so the dashboard can show the
+            // report growing while the session runs.
+            try {
+                MonitorHub.get().setRecordBytes(ActivityLogWriter.get().writtenBytes());
+            } catch (Throwable ignored) {
+                // the size is decorative
+            }
             MonitorState state = MonitorHub.get().stateSnapshot();
             if (state.phase == MonitorState.Phase.RUNNING
                     || state.phase == MonitorState.Phase.STARTING) {
