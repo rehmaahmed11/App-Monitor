@@ -39,6 +39,8 @@ public final class DiagnosticLog {
     private static final String PREFS_NAME = "applens_diagnostic_state";
     private static final String KEY_PENDING_REPORT = "pending_report";
     private static final String KEY_LAST_EXIT_TIMESTAMP = "last_exit_timestamp";
+    private static final String KEY_SESSION_ACTIVITY = "session_activity";
+    private static final String KEY_SESSION_STARTED = "session_started";
     private static final long MAX_LOG_BYTES = 512L * 1024L;
     private static final int MAX_ENTRY_BYTES = 128 * 1024;
     private static final int MAX_EXIT_TRACE_BYTES = 48 * 1024;
@@ -96,18 +98,109 @@ public final class DiagnosticLog {
      * not reach the Java uncaught-exception handler (API 30 and newer).
      */
     public static void inspectPreviousProcessExit(Context context) {
-        if (context == null || Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+        if (context == null) {
             return;
         }
         Context application = context.getApplicationContext();
         if (application == null) {
             application = context;
         }
-        try {
-            Api30.inspect(application);
-        } catch (Throwable ignored) {
-            // Exit history is optional; keep app startup independent of it.
+        String explanation = "";
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            try {
+                explanation = Api30.inspect(application);
+            } catch (Throwable ignored) {
+                // Exit history is optional; keep app startup independent of it.
+            }
         }
+        try {
+            // Even without exit history (Android 10 and older, or an exit the system
+            // did not classify) an unfinished session is still reported.
+            reportUnfinishedSession(application, explanation);
+        } catch (Throwable ignored) {
+            // noop
+        }
+    }
+
+    /**
+     * Records that a long running, crash-prone activity has begun — monitoring a
+     * package, for instance. If the process disappears before
+     * {@link #endSession()} runs, the next launch reports it, which is what makes
+     * ANRs, low-memory kills and "the app just vanished" visible in the DIAG box
+     * even though no Java exception was ever thrown.
+     */
+    public static void beginSession(String activity) {
+        Context context = appContext;
+        if (context == null) {
+            return;
+        }
+        try {
+            preferences(context).edit()
+                    .putString(KEY_SESSION_ACTIVITY, value(activity, "a monitoring session"))
+                    .putLong(KEY_SESSION_STARTED, System.currentTimeMillis())
+                    .commit();
+        } catch (Throwable error) {
+            Log.e(TAG, "Could not record the session breadcrumb", error);
+        }
+    }
+
+    /** Clears the breadcrumb left by {@link #beginSession(String)}. */
+    public static void endSession() {
+        Context context = appContext;
+        if (context == null) {
+            return;
+        }
+        try {
+            preferences(context).edit()
+                    .remove(KEY_SESSION_ACTIVITY)
+                    .remove(KEY_SESSION_STARTED)
+                    .commit();
+        } catch (Throwable error) {
+            Log.e(TAG, "Could not clear the session breadcrumb", error);
+        }
+    }
+
+    /**
+     * Turns a breadcrumb left behind by a process that never came back into a
+     * report. Called once at start-up, after the OS exit history was inspected.
+     */
+    private static void reportUnfinishedSession(Context context, String systemExplanation) {
+        if (context == null) {
+            return;
+        }
+        String activity;
+        long started;
+        try {
+            SharedPreferences prefs = preferences(context);
+            activity = prefs.getString(KEY_SESSION_ACTIVITY, null);
+            started = prefs.getLong(KEY_SESSION_STARTED, 0L);
+            if (activity == null || activity.trim().isEmpty()) {
+                return;
+            }
+            prefs.edit().remove(KEY_SESSION_ACTIVITY).remove(KEY_SESSION_STARTED).commit();
+        } catch (Throwable error) {
+            Log.e(TAG, "Could not read the session breadcrumb", error);
+            return;
+        }
+        StringBuilder details = new StringBuilder();
+        details.append("AppLens stopped while ").append(activity).append(".\n");
+        if (started > 0) {
+            details.append("Session started: ").append(formatTime(started)).append('\n');
+            details.append("Ran for: ")
+                    .append(Math.max(0L, (System.currentTimeMillis() - started) / 1000L))
+                    .append(" s before the process ended\n");
+        }
+        details.append('\n');
+        if (systemExplanation != null && !systemExplanation.isEmpty()) {
+            details.append("Android reported: ").append(systemExplanation).append('\n');
+        } else {
+            details.append("Android did not record a reason, which usually means the process\n")
+                    .append("was killed from outside (task swipe, battery optimiser, low memory)\n")
+                    .append("or stopped responding while the UI thread was busy.\n");
+        }
+        markPendingReport(context);
+        appendEntry(context, "SESSION ENDED UNEXPECTEDLY",
+                "Monitoring session did not finish", details.toString(), "AppLens startup check", true);
     }
 
     /** Stores an unexpected but handled error so it can still be copied later. */
@@ -239,16 +332,17 @@ public final class DiagnosticLog {
         private Api30() {
         }
 
-        static void inspect(Context context) {
+        /** Returns a one line summary of the newest reportable exit, or "". */
+        static String inspect(Context context) {
             android.app.ActivityManager manager = (android.app.ActivityManager)
                     context.getSystemService(Context.ACTIVITY_SERVICE);
             if (manager == null) {
-                return;
+                return "";
             }
             List<android.app.ApplicationExitInfo> exits = manager.getHistoricalProcessExitReasons(
                     context.getPackageName(), 0, 12);
             if (exits == null || exits.isEmpty()) {
-                return;
+                return "";
             }
             SharedPreferences prefs = preferences(context);
             long lastTimestamp = prefs.getLong(KEY_LAST_EXIT_TIMESTAMP, 0L);
@@ -265,7 +359,7 @@ public final class DiagnosticLog {
                 }
             }
             if (fresh.isEmpty()) {
-                return;
+                return "";
             }
             Collections.sort(fresh, new Comparator<android.app.ApplicationExitInfo>() {
                 @Override
@@ -274,16 +368,20 @@ public final class DiagnosticLog {
                     return Long.compare(left.getTimestamp(), right.getTimestamp());
                 }
             });
+            String summary = "";
             for (android.app.ApplicationExitInfo exit : fresh) {
                 if (!isReportableExit(exit.getReason())) {
                     continue;
                 }
+                summary = exitReasonName(exit.getReason()) + " at " + formatTime(exit.getTimestamp())
+                        + " (process " + value(exit.getProcessName(), "unknown") + ")";
                 markPendingReport(context);
                 appendEntry(context, "ANDROID PROCESS EXIT",
                         exitReasonName(exit.getReason()) + " (reason " + exit.getReason() + ")",
                         exitDetails(exit), "Android system", true);
             }
             prefs.edit().putLong(KEY_LAST_EXIT_TIMESTAMP, newestTimestamp).commit();
+            return summary;
         }
 
         private static boolean isReportableExit(int reason) {
@@ -394,10 +492,22 @@ public final class DiagnosticLog {
                 .append(' ').append(value(Build.MODEL, "unknown"))
                 .append(" [").append(value(Build.DEVICE, "unknown")).append("]\n");
         try {
-            result.append("Root access: ").append(RootShell.get().isRootGranted()
+            RootShell root = RootShell.get();
+            result.append("Root access: ").append(root.isRootGranted()
                     ? "granted" : "not granted / unavailable").append('\n');
+            result.append("Root shell: ").append(root.hasLiveSession()
+                            ? "shared session alive" : "no session")
+                    .append(" · su spawns ").append(root.suInvocations())
+                    .append(" · manager ").append(root.manager()).append('\n');
         } catch (Throwable ignored) {
             result.append("Root access: unavailable\n");
+        }
+        try {
+            com.applens.monitor.monitor.MonitorHub hub = com.applens.monitor.monitor.MonitorHub.get();
+            result.append("Monitoring: ").append(hub.isActive()
+                    ? value(hub.pkg, "unknown package") : "idle").append('\n');
+        } catch (Throwable ignored) {
+            // the hub is optional context
         }
         return result.toString();
     }

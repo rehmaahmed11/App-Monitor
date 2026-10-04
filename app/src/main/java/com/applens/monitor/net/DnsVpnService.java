@@ -1,11 +1,22 @@
 package com.applens.monitor.net;
 
+import android.app.Notification;
+import android.app.NotificationChannel;
+import android.app.NotificationManager;
+import android.content.Context;
+import android.content.pm.ServiceInfo;
+import android.net.ConnectivityManager;
+import android.net.LinkProperties;
+import android.net.Network;
 import android.net.VpnService;
+import android.os.Build;
 import android.os.ParcelFileDescriptor;
 
+import com.applens.monitor.R;
 import com.applens.monitor.core.Fmt;
 import com.applens.monitor.core.RootShell;
 import com.applens.monitor.log.ActivityLogWriter;
+import com.applens.monitor.log.DiagnosticLog;
 import com.applens.monitor.model.DnsRecord;
 import com.applens.monitor.model.EventCategory;
 import com.applens.monitor.model.EventItem;
@@ -14,15 +25,12 @@ import com.applens.monitor.monitor.MonitorHub;
 
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
-import java.io.OutputStream;
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
 import java.net.InetAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
-import java.util.ArrayList;
 import java.util.LinkedHashSet;
-import java.util.List;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
@@ -56,12 +64,19 @@ public class DnsVpnService extends VpnService {
     private static final int RELAY_TCP53 = 15353;
     private static final int RELAY_TLS853 = 15853;
 
+    private static final String CHANNEL_ID = "applens_dns_capture";
+    private static final int NOTIFICATION_ID = 0xA12;
+    /** Every root firewall rule AppLens installs carries one of these comments. */
+    private static final String RULE_TAG_TCP = "applens-dns";
+    private static final String RULE_TAG_DOT = "applens-dot";
+
     private static volatile boolean running;
     private static volatile String status = "idle";
     private static volatile String error = "";
 
     private ParcelFileDescriptor tun;
     private final AtomicBoolean stop = new AtomicBoolean(false);
+    private final AtomicBoolean starting = new AtomicBoolean(false);
     private final ExecutorService workers = Executors.newFixedThreadPool(8);
     private final AtomicLong queryCount = new AtomicLong();
     private final Set<String> resolvers = new LinkedHashSet<>();
@@ -71,6 +86,9 @@ public class DnsVpnService extends VpnService {
     private ServerSocket tlsRelay;
     private String pkg = "";
     private int uid = -1;
+    /** The real resolver queries are forwarded to (never the synthetic TUN one). */
+    private volatile String upstream = "";
+    private volatile boolean scopedToApp;
 
     public static boolean isRunning() {
         return running;
@@ -91,12 +109,20 @@ public class DnsVpnService extends VpnService {
     private static final AtomicLong QUERY_COUNTER = new AtomicLong();
 
     @Override
+    public void onCreate() {
+        super.onCreate();
+        createChannel();
+    }
+
+    @Override
     public int onStartCommand(android.content.Intent intent, int flags, int startId) {
-        if (intent == null) {
-            return START_NOT_STICKY;
-        }
-        String action = intent.getAction();
-        if (ACTION_STOP.equals(action)) {
+        // The service is launched with startForegroundService(); Android kills the
+        // whole process with ForegroundServiceDidNotStartInTimeException unless
+        // startForeground() runs within a few seconds — on *every* path, including
+        // the stop and the null-intent restart.
+        enterForeground("Preparing DNS capture");
+        String action = intent == null ? null : intent.getAction();
+        if (intent == null || ACTION_STOP.equals(action)) {
             stopEverything();
             return START_NOT_STICKY;
         }
@@ -108,29 +134,61 @@ public class DnsVpnService extends VpnService {
         stop.set(false);
         QUERY_COUNTER.set(0);
         if (running) {
+            enterForeground(statusLine());
             return START_STICKY;
         }
+        if (!starting.compareAndSet(false, true)) {
+            return START_STICKY;
+        }
+        // Reading the resolvers, establishing the TUN and installing firewall rules
+        // all block — several seconds when root is involved. None of it may happen
+        // on the service main thread, which is the same thread the UI draws on.
+        Thread bringUp = new Thread(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    bringUp();
+                } finally {
+                    starting.set(false);
+                }
+            }
+        }, "applens-vpn-start");
+        bringUp.setDaemon(true);
+        bringUp.start();
+        return START_STICKY;
+    }
+
+    private void bringUp() {
         collectResolvers();
+        ParcelFileDescriptor descriptor;
         try {
-            tun = establish();
+            descriptor = establish();
         } catch (Throwable t) {
             error = String.valueOf(t.getMessage());
             status = "failed: " + error;
-            stopSelf();
-            return START_NOT_STICKY;
+            DiagnosticLog.recordProblem("DNS capture VPN could not be established; "
+                    + "monitoring continues without it", t);
+            stopEverything();
+            return;
         }
-        if (tun == null) {
+        if (descriptor == null) {
             status = "failed: VPN could not be established";
             error = status;
-            stopSelf();
-            return START_NOT_STICKY;
+            DiagnosticLog.recordProblem("DNS capture VPN could not be established; "
+                            + "monitoring continues without it",
+                    new IllegalStateException("VpnService.Builder.establish() returned null"));
+            stopEverything();
+            return;
         }
+        tun = descriptor;
         running = true;
         status = "capturing";
         error = "";
-        installRelayRules();
-        startTcpRelay();
-        startTlsRelay();
+        // Bind the relays first: the firewall rules are only installed once there
+        // is something listening, otherwise DNS over TCP/TLS would black-hole.
+        boolean tcpUp = startTcpRelay();
+        boolean tlsUp = startTlsRelay();
+        installRelayRules(tcpUp, tlsUp);
         pump = new Thread(new Runnable() {
             @Override
             public void run() {
@@ -139,10 +197,11 @@ public class DnsVpnService extends VpnService {
         }, "applens-tun");
         pump.setDaemon(true);
         pump.start();
+        enterForeground(statusLine());
         MonitorHub.get().publish(EventItem.of(EventCategory.DNS, "DNS capture online",
-                "TUN active, " + resolvers.size() + " resolver(s) routed, MTU " + MTU,
+                (scopedToApp ? "Scoped to " + pkg : "Device wide")
+                        + ", upstream " + Fmt.nz(upstream, "n/a") + ", MTU " + MTU,
                 "VpnService"));
-        return START_STICKY;
     }
 
     private ParcelFileDescriptor establish() {
@@ -157,6 +216,25 @@ public class DnsVpnService extends VpnService {
             }
         }
         builder.addRoute(DNS_ADDRESS, 32);
+        // Only the monitored application is put inside the TUN. Every other app on
+        // the device — and AppLens itself — keeps resolving through the normal
+        // network path, so a capture problem can never take the phone offline.
+        scopedToApp = false;
+        if (pkg != null && !pkg.isEmpty() && !pkg.equals(getPackageName())) {
+            try {
+                builder.addAllowedApplication(pkg);
+                scopedToApp = true;
+            } catch (Throwable notInstalled) {
+                scopedToApp = false;
+            }
+        }
+        if (!scopedToApp) {
+            try {
+                builder.addDisallowedApplication(getPackageName());
+            } catch (Throwable ignored) {
+                // noop
+            }
+        }
         try {
             return builder.establish();
         } catch (Throwable t) {
@@ -167,8 +245,27 @@ public class DnsVpnService extends VpnService {
 
     private void collectResolvers() {
         resolvers.clear();
+        // The framework knows the resolvers of the active network on every Android
+        // version; net.dns* system properties have been empty since Android 9.
+        try {
+            ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
+            if (cm != null) {
+                Network active = cm.getActiveNetwork();
+                LinkProperties props = active == null ? null : cm.getLinkProperties(active);
+                if (props != null) {
+                    for (InetAddress address : props.getDnsServers()) {
+                        String text = address == null ? null : address.getHostAddress();
+                        if (isIpv4(text)) {
+                            resolvers.add(text);
+                        }
+                    }
+                }
+            }
+        } catch (Throwable ignored) {
+            // fall through to the root probes
+        }
         RootShell root = RootShell.get();
-        if (root.ensureRoot()) {
+        if (resolvers.isEmpty() && root.isRootGranted()) {
             String prop = root.exec("getprop | grep -E '^\\[net\\.dns[0-9]+\\]' 2>/dev/null", 8000);
             if (prop != null) {
                 for (String line : prop.split("\n")) {
@@ -192,6 +289,82 @@ public class DnsVpnService extends VpnService {
             // Capture-only fallbacks: traffic is only forwarded if an app really sends it there.
             resolvers.add("8.8.8.8");
             resolvers.add("1.1.1.1");
+        }
+        upstream = firstRealResolver();
+    }
+
+    /** The first resolver that is a real server rather than our own TUN address. */
+    private String firstRealResolver() {
+        for (String resolver : resolvers) {
+            if (isIpv4(resolver) && !DNS_ADDRESS.equals(resolver) && !TUN_ADDRESS.equals(resolver)) {
+                return resolver;
+            }
+        }
+        return "8.8.8.8";
+    }
+
+    /**
+     * Where a query actually has to go. Queries addressed to the synthetic server
+     * AppLens advertises (10.111.222.2) exist only inside the TUN — forwarding them
+     * back to that address is what used to drop every lookup the app made.
+     */
+    private String upstreamFor(String destination) {
+        if (isIpv4(destination) && !DNS_ADDRESS.equals(destination) && !TUN_ADDRESS.equals(destination)) {
+            return destination;
+        }
+        String real = upstream;
+        return isIpv4(real) ? real : firstRealResolver();
+    }
+
+    // ------------------------------------------------------------------
+    // Foreground notification
+    // ------------------------------------------------------------------
+
+    private void createChannel() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
+            return;
+        }
+        try {
+            NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
+            if (nm == null || nm.getNotificationChannel(CHANNEL_ID) != null) {
+                return;
+            }
+            NotificationChannel channel = new NotificationChannel(CHANNEL_ID,
+                    "AppLens DNS capture", NotificationManager.IMPORTANCE_LOW);
+            channel.setDescription("Active while DNS lookups of the monitored app are recorded");
+            channel.setShowBadge(false);
+            nm.createNotificationChannel(channel);
+        } catch (Throwable ignored) {
+            // noop
+        }
+    }
+
+    private String statusLine() {
+        return (scopedToApp ? Fmt.nz(pkg, "monitored app") : "all applications")
+                + " · upstream " + Fmt.nz(upstream, "n/a");
+    }
+
+    private void enterForeground(String text) {
+        try {
+            createChannel();
+            Notification.Builder builder = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
+                    ? new Notification.Builder(this, CHANNEL_ID)
+                    : new Notification.Builder(this);
+            builder.setContentTitle("AppLens DNS capture")
+                    .setContentText(text)
+                    .setSmallIcon(R.drawable.ic_dns)
+                    .setOngoing(true)
+                    .setOnlyAlertOnce(true);
+            Notification notification = builder.build();
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                startForeground(NOTIFICATION_ID, notification,
+                        ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE);
+            } else {
+                startForeground(NOTIFICATION_ID, notification);
+            }
+        } catch (Throwable failure) {
+            DiagnosticLog.recordThrottledProblem("vpn-foreground",
+                    "DNS capture service could not enter the foreground", failure);
         }
     }
 
@@ -286,26 +459,44 @@ public class DnsVpnService extends VpnService {
         String domain = question == null ? "" : question.name;
         long now = System.currentTimeMillis();
         int clientUid = SocketUidResolver.resolveUdpUid(srcIp, srcPort);
+        String target = upstreamFor(dstIp);
         if (uid < 0 || clientUid < 0 || clientUid == uid || belongsToMonitored(clientUid)) {
-            record(domain, question, request, srcIp, dstIp, clientUid, "UDP", toscs(tos), now, true);
+            record(domain, question, request, srcIp, target, clientUid, "UDP", toscs(tos), now, true);
         }
+        DatagramSocket socket = null;
         try {
-            DatagramSocket socket = new DatagramSocket();
+            socket = new DatagramSocket();
             protect(socket);
-            socket.setSoTimeout(4000);
-            byte[] src = DnsMessage.asciiBytes(srcIp);
-            InetAddress replyFrom = InetAddress.getByAddress(src);
-            DatagramPacket out = new DatagramPacket(query, query.length, InetAddress.getByName(dstIp), 53);
+            socket.setSoTimeout(5000);
+            // Forward to a *real* resolver. The address the app used may be the
+            // synthetic 10.111.222.2 we advertise, which exists only in the TUN.
+            DatagramPacket out = new DatagramPacket(query, query.length,
+                    InetAddress.getByName(target), 53);
             socket.send(out);
             byte[] buf = new byte[4096];
             DatagramPacket in = new DatagramPacket(buf, buf.length);
             socket.receive(in);
-            socket.close();
             byte[] response = new byte[in.getLength()];
             System.arraycopy(in.getData(), in.getOffset(), response, 0, in.getLength());
             writeBack(original, srcIp, dstIp, srcPort, dstPort, tos, response);
         } catch (Throwable t) {
-            // upstream timeout or unreachable: drop, the client will retry over TCP
+            // Upstream timed out or is unreachable. Hand the client a SERVFAIL so it
+            // fails fast and retries over its own path instead of hanging on a
+            // lookup that will never be answered.
+            byte[] failure = DnsMessage.serverFailure(query);
+            if (failure != null) {
+                writeBack(original, srcIp, dstIp, srcPort, dstPort, tos, failure);
+            }
+            DiagnosticLog.recordThrottledProblem("dns-upstream",
+                    "DNS query could not be forwarded to " + target, t);
+        } finally {
+            if (socket != null) {
+                try {
+                    socket.close();
+                } catch (Throwable ignored) {
+                    // noop
+                }
+            }
         }
     }
 
@@ -464,63 +655,124 @@ public class DnsVpnService extends VpnService {
     // DNS over TCP / TLS loopback relay
     // ------------------------------------------------------------------
 
-    private void installRelayRules() {
-        if (!RootShell.get().ensureRoot()) {
+    /**
+     * Redirects the monitored app's DNS-over-TCP / DNS-over-TLS to the local relay.
+     *
+     * <p>Two safety properties matter here, because a DNAT rule outlives the
+     * process that installed it: the rules are restricted to the monitored uid
+     * (never the whole device) and they are only installed once the relay is
+     * actually listening. {@link #purgeStaleRules()} removes anything a crash left
+     * behind the next time AppLens starts.</p>
+     */
+    private void installRelayRules(boolean tcpUp, boolean tlsUp) {
+        if (!RootShell.get().ensureRoot() || uid <= 0) {
             return;
         }
+        String owner = " -m owner --uid-owner " + uid;
         for (String resolver : resolvers) {
             if (!isIpv4(resolver)) {
                 continue;
             }
             String tag = resolver.replace('.', '_');
-            RootShell.get().exec("iptables -t nat -A OUTPUT -p tcp -d " + resolver
-                    + " --dport 53 -m comment --comment applens-dns -j DNAT --to-destination 127.0.0.1:"
-                    + RELAY_TCP53 + " 2>/dev/null");
-            installedRules.add("dns:" + tag);
-            RootShell.get().exec("iptables -t nat -A OUTPUT -p tcp -d " + resolver
-                    + " --dport 853 -m comment --comment applens-dot -j DNAT --to-destination 127.0.0.1:"
-                    + RELAY_TLS853 + " 2>/dev/null");
-            installedRules.add("dot:" + tag);
+            if (tcpUp) {
+                RootShell.get().exec("iptables -t nat -A OUTPUT -p tcp -d " + resolver
+                        + " --dport 53" + owner + " -m comment --comment " + RULE_TAG_TCP
+                        + " -j DNAT --to-destination 127.0.0.1:" + RELAY_TCP53 + " 2>/dev/null", 8000);
+                installedRules.add("dns:" + tag);
+            }
+            if (tlsUp) {
+                RootShell.get().exec("iptables -t nat -A OUTPUT -p tcp -d " + resolver
+                        + " --dport 853" + owner + " -m comment --comment " + RULE_TAG_DOT
+                        + " -j DNAT --to-destination 127.0.0.1:" + RELAY_TLS853 + " 2>/dev/null", 8000);
+                installedRules.add("dot:" + tag);
+            }
         }
     }
 
     private void removeRelayRules() {
-        if (!RootShell.get().isRootGranted()) {
+        if (!RootShell.get().isRootGranted() || installedRules.isEmpty()) {
             return;
         }
+        String owner = " -m owner --uid-owner " + uid;
         for (String resolver : resolvers) {
             if (!isIpv4(resolver)) {
                 continue;
             }
             RootShell.get().exec("iptables -t nat -D OUTPUT -p tcp -d " + resolver
-                    + " --dport 53 -m comment --comment applens-dns -j DNAT --to-destination 127.0.0.1:"
-                    + RELAY_TCP53 + " 2>/dev/null");
+                    + " --dport 53" + owner + " -m comment --comment " + RULE_TAG_TCP
+                    + " -j DNAT --to-destination 127.0.0.1:" + RELAY_TCP53 + " 2>/dev/null", 8000);
             RootShell.get().exec("iptables -t nat -D OUTPUT -p tcp -d " + resolver
-                    + " --dport 853 -m comment --comment applens-dot -j DNAT --to-destination 127.0.0.1:"
-                    + RELAY_TLS853 + " 2>/dev/null");
+                    + " --dport 853" + owner + " -m comment --comment " + RULE_TAG_DOT
+                    + " -j DNAT --to-destination 127.0.0.1:" + RELAY_TLS853 + " 2>/dev/null", 8000);
         }
         installedRules.clear();
+        purgeStaleRules();
     }
 
-    private void startTcpRelay() {
-        startRelay(RELAY_TCP53, "TCP", 53);
+    /**
+     * Deletes every DNS redirect AppLens ever installed, whatever session created
+     * it. Called when a capture stops and once at application start, so a crashed
+     * session can never leave the device with DNS pointing at a dead local port.
+     */
+    public static void purgeStaleRules() {
+        RootShell root = RootShell.get();
+        if (!root.isRootGranted()) {
+            return;
+        }
+        try {
+            for (String tag : new String[]{RULE_TAG_TCP, RULE_TAG_DOT}) {
+                // Walk the rule list by number, newest first, so the indices stay
+                // valid while matching rules are removed.
+                String listing = root.exec("iptables -t nat -S OUTPUT 2>/dev/null", 8000);
+                if (listing == null || listing.isEmpty()) {
+                    return;
+                }
+                for (String line : listing.split("\n")) {
+                    if (!line.contains("--comment " + tag) && !line.contains("--comment \"" + tag + "\"")) {
+                        continue;
+                    }
+                    String rule = line.trim();
+                    if (!rule.startsWith("-A OUTPUT")) {
+                        continue;
+                    }
+                    root.exec("iptables -t nat -D" + rule.substring(2) + " 2>/dev/null", 8000);
+                }
+            }
+        } catch (Throwable error) {
+            DiagnosticLog.recordThrottledProblem("vpn-rule-purge",
+                    "Could not remove leftover DNS redirect rules", error);
+        }
     }
 
-    private void startTlsRelay() {
-        startRelay(RELAY_TLS853, "DoT", 853);
+    private boolean startTcpRelay() {
+        return startRelay(RELAY_TCP53, "TCP", 53);
     }
 
-    private void startRelay(final int port, final String transport, final int remotePort) {
+    private boolean startTlsRelay() {
+        return startRelay(RELAY_TLS853, "DoT", 853);
+    }
+
+    /** Binds the relay socket synchronously; returns false when the port is taken. */
+    private boolean startRelay(final int port, final String transport, final int remotePort) {
+        final ServerSocket server;
+        try {
+            server = new ServerSocket();
+            server.setReuseAddress(true);
+            server.bind(new java.net.InetSocketAddress("127.0.0.1", port));
+        } catch (Throwable t) {
+            DiagnosticLog.recordThrottledProblem("vpn-relay-" + port,
+                    "DNS " + transport + " relay could not listen on 127.0.0.1:" + port, t);
+            return false;
+        }
+        if (port == RELAY_TCP53) {
+            tcpRelay = server;
+        } else {
+            tlsRelay = server;
+        }
         Thread t = new Thread(new Runnable() {
             @Override
             public void run() {
                 try {
-                    ServerSocket server = new ServerSocket(port);
-                    if (port == RELAY_TCP53) {
-                        tcpRelay = server;
-                    } else {
-                        tlsRelay = server;
-                    }
                     while (!stop.get()) {
                         final Socket client = server.accept();
                         workers.execute(new Runnable() {
@@ -537,18 +789,25 @@ public class DnsVpnService extends VpnService {
         }, "applens-relay-" + port);
         t.setDaemon(true);
         t.start();
+        return true;
     }
 
     private void pump(Socket client, String transport, int remotePort) {
         Socket server = null;
         try {
             client.setSoTimeout(30000);
-            String host = client.getInetAddress().getHostAddress();
-            int port = client.getPort();
-            int originalPort = originalDestinationPort(host, port, remotePort);
-            DnsRelayState state = new DnsRelayState(transport, originalPort, remotePort);
-            server = new Socket(host, originalPort);
+            // The pre-DNAT destination is not visible to a Java socket, so the
+            // stream is forwarded to the resolver the redirect was installed for —
+            // connecting back to the client address (127.0.0.1) could only ever
+            // produce a refused connection, which is what broke DoT lookups.
+            String host = upstreamFor(null);
+            DnsRelayState state = new DnsRelayState(transport, remotePort, remotePort);
+            server = new Socket();
+            // Bind first so the socket has a file descriptor to protect, then keep
+            // the relay's own traffic outside the TUN.
+            server.bind(new java.net.InetSocketAddress(0));
             protect(server);
+            server.connect(new java.net.InetSocketAddress(host, remotePort), 8000);
             server.setSoTimeout(30000);
             final Socket finalClient = client;
             final Socket finalServer = server;
@@ -587,34 +846,6 @@ public class DnsVpnService extends VpnService {
         }
     }
 
-    /** Resolves the pre-DNAT destination by matching the client socket in /proc/net/tcp. */
-    private int originalDestinationPort(String clientIp, int clientPort, int fallback) {
-        String dump = RootShell.get().exec("cat /proc/net/tcp /proc/net/tcp6 2>/dev/null", 12000);
-        if (dump == null) {
-            return fallback;
-        }
-        String needle = String.format("%04X", clientPort);
-        for (String line : dump.split("\n")) {
-            String[] f = line.trim().split("\\s+");
-            if (f.length < 4) {
-                continue;
-            }
-            String[] local = f[1].split(":");
-            if (local.length != 2 || !local[1].equalsIgnoreCase(needle)) {
-                continue;
-            }
-            String[] remote = f[2].split(":");
-            if (remote.length != 2) {
-                continue;
-            }
-            int port = RootShell.hexPort(remote[1]);
-            if (port > 0) {
-                return port == fallback ? fallback : port;
-            }
-        }
-        return fallback;
-    }
-
     private void closeQuietly(java.io.Closeable s) {
         if (s != null) {
             try {
@@ -631,6 +862,8 @@ public class DnsVpnService extends VpnService {
         status = "stopped";
         closeQuietly(tcpRelay);
         closeQuietly(tlsRelay);
+        tcpRelay = null;
+        tlsRelay = null;
         try {
             if (tun != null) {
                 tun.close();
@@ -639,7 +872,21 @@ public class DnsVpnService extends VpnService {
             // noop
         }
         tun = null;
-        removeRelayRules();
+        // Removing the redirects touches root, which must not run on the service
+        // main thread; the TUN is already closed so DNS is restored either way.
+        final Thread cleanup = new Thread(new Runnable() {
+            @Override
+            public void run() {
+                removeRelayRules();
+            }
+        }, "applens-vpn-cleanup");
+        cleanup.setDaemon(true);
+        cleanup.start();
+        try {
+            stopForeground(true);
+        } catch (Throwable ignored) {
+            // noop
+        }
         stopSelf();
     }
 

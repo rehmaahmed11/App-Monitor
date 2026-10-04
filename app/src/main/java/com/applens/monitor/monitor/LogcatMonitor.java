@@ -70,6 +70,12 @@ public final class LogcatMonitor {
             {"GCM", EventCategory.NETWORK, "Push message"},
     };
 
+    /** Categories worth interrupting the dashboard for. */
+    private static final Set<EventCategory> IMPORTANT = java.util.Collections.unmodifiableSet(
+            java.util.EnumSet.of(EventCategory.LOCATION, EventCategory.CAMERA,
+                    EventCategory.MICROPHONE, EventCategory.CONTACTS, EventCategory.PHONE,
+                    EventCategory.CLIPBOARD, EventCategory.SECURITY, EventCategory.SENSORS));
+
     private final String pkg;
     private final ActivitySink sink;
     private final AtomicBoolean running = new AtomicBoolean(false);
@@ -95,13 +101,24 @@ public final class LogcatMonitor {
             return;
         }
         String binary = RootShell.get().logcat();
-        String cmd = (binary == null ? "logcat" : binary) + " -v threadtime -b main -b system -b events";
+        if (binary == null) {
+            running.set(false);
+            return;
+        }
+        // "-T 1" starts at the end of the buffer. Without it logcat replays every
+        // line already in main+system+events — tens of thousands of them — as fast
+        // as the pipe allows, which flooded the activity feed the moment a session
+        // started and left the UI thread with no chance to keep up.
+        String cmd = binary + " -v threadtime -T 1 -b main -b system -b events";
         process = RootShell.get().startStream(cmd, new RootShell.LineSink() {
             @Override
             public void onLine(String line) {
                 handle(line);
             }
         });
+        if (process == null) {
+            running.set(false);
+        }
     }
 
     public void stop() {
@@ -149,7 +166,9 @@ public final class LogcatMonitor {
             event.title = (String) match[1];
             event.detail = Fmt.limit(line, 180);
             event.source = "logcat:" + tagOf(line);
-            event.important = true;
+            // "important" forces a full dashboard repaint, so it is reserved for
+            // the privacy-relevant categories rather than every matched line.
+            event.important = IMPORTANT.contains(event.category);
         }
         if (sink != null) {
             sink.onEvent(event);

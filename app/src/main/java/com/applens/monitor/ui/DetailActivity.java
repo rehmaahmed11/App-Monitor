@@ -56,6 +56,8 @@ public class DetailActivity extends Activity {
     public static final String EXTRA_UID = "uid";
 
     private static final int REQ_VPN = 4242;
+    /** Minimum time between two full repaints of the visible tab. */
+    private static final long MIN_REFRESH_MS = 500;
 
     private final Handler main = new Handler(Looper.getMainLooper());
     private final ExecutorService io = Executors.newSingleThreadExecutor(runnable -> {
@@ -87,6 +89,8 @@ public class DetailActivity extends Activity {
     private final List<TextView> tabViews = new ArrayList<>();
     private int currentTab;
     private boolean pendingStart;
+    private boolean refreshPending;
+    private long lastRefresh;
 
     private TextView statUp;
     private TextView statDown;
@@ -366,10 +370,13 @@ public class DetailActivity extends Activity {
 
     private void launchMonitor(boolean withVpn) {
         MonitorHub.get().begin(pkg, label, uid);
-        MonitorService.start(this, pkg, label, uid, withVpn);
-        Toast.makeText(this, withVpn
-                        ? "Monitoring started with DNS capture"
-                        : "Monitoring started (DNS capture unavailable)", Toast.LENGTH_SHORT).show();
+        // The samplers come up first and then the app is brought to the front, so
+        // its start-up — the most interesting part — is inside the record.
+        MonitorService.start(this, pkg, label, uid, withVpn, true);
+        Toast.makeText(this, (withVpn
+                ? "Monitoring started with DNS capture · opening "
+                : "Monitoring started (no DNS capture) · opening ") + label(),
+                Toast.LENGTH_SHORT).show();
         updateMonitorButton();
     }
 
@@ -390,13 +397,28 @@ public class DetailActivity extends Activity {
         try {
             Intent intent = getPackageManager().getLaunchIntentForPackage(pkg);
             if (intent != null) {
+                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK
+                        | Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED);
                 startActivity(intent);
-            } else {
-                Toast.makeText(this, "No launcher activity", Toast.LENGTH_SHORT).show();
+                return;
             }
-        } catch (Throwable t) {
-            Toast.makeText(this, "Unable to launch", Toast.LENGTH_SHORT).show();
+        } catch (Throwable ignored) {
+            // fall through to the root launcher
         }
+        // Apps without an exported launcher activity (or a disabled one) still
+        // start through the activity manager.
+        Toast.makeText(this, "Starting " + label() + "…", Toast.LENGTH_SHORT).show();
+        io.execute(() -> {
+            final boolean ok = RootShell.get().isRootGranted()
+                    && RootShell.get().statusOf("monkey -p " + RootShell.shQuote(pkg)
+                    + " -c android.intent.category.LAUNCHER 1 >/dev/null 2>&1") == 0;
+            main.post(() -> {
+                if (!ok) {
+                    Toast.makeText(this, "No launcher activity for " + pkg,
+                            Toast.LENGTH_LONG).show();
+                }
+            });
+        });
     }
 
     private void openSystemSettings() {
@@ -466,7 +488,29 @@ public class DetailActivity extends Activity {
         }
         monitorStatus.setText(status.toString());
         updateMonitorButton();
-        refreshCurrent();
+        scheduleRefresh();
+    }
+
+    /**
+     * Repaints the visible tab at most twice a second. Rebuilding a tab means
+     * discarding and re-inflating every row, so doing it on every state tick is
+     * what made the dashboard — and with it the activity transition to the app
+     * being monitored — crawl to a halt.
+     */
+    private void scheduleRefresh() {
+        if (refreshPending) {
+            return;
+        }
+        refreshPending = true;
+        long now = android.os.SystemClock.uptimeMillis();
+        long delay = Math.max(0, lastRefresh + MIN_REFRESH_MS - now);
+        main.postDelayed(() -> {
+            refreshPending = false;
+            lastRefresh = android.os.SystemClock.uptimeMillis();
+            if (!isFinishing() && !isDestroyed()) {
+                refreshCurrent();
+            }
+        }, delay);
     }
 
     private void onEvent(EventItem event) {

@@ -9,20 +9,39 @@ import java.io.ByteArrayOutputStream;
 import java.io.Closeable;
 import java.io.InputStream;
 import java.io.InputStreamReader;
+import java.io.OutputStreamWriter;
+import java.io.Writer;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Everything AppLens does that a normal application cannot do goes through this
- * class: it owns a negotiated {@code su} session, executes one-shot root commands,
- * streams long running root processes (logcat, inotifyd, tcpdump) and reads or
- * writes files that live outside the AppLens sandbox (including /data/data/&lt;pkg&gt;
- * and /sdcard).
+ * class: it owns <em>one</em> negotiated {@code su} session, executes root commands
+ * inside it, streams long running root processes (logcat, inotifyd, tcpdump) and
+ * reads or writes files that live outside the AppLens sandbox (including
+ * /data/data/&lt;pkg&gt; and /sdcard).
  *
- * <p>All public methods are safe to call from any thread. Commands are executed
- * with a hard timeout so a hung {@code su} binary can never wedge the UI.</p>
+ * <p><b>One su process, not thousands.</b> Magisk / KernelSU / APatch raise a
+ * "&lt;app&gt; was granted superuser rights" toast for <em>every</em> {@code su}
+ * invocation. The monitors poll once per second, so spawning {@code su -c …} per
+ * command produced a permanent stream of toasts. Instead a single interactive
+ * {@code su} shell is kept open for the lifetime of the process and commands are
+ * written to its stdin, terminated by a unique marker that also carries the exit
+ * status. One superuser request per app start — the toast appears once.</p>
+ *
+ * <p>All public methods are safe to call from any thread. Commands are serialised
+ * on the session and bounded by a hard timeout, so a hung {@code su} binary can
+ * never wedge the UI: the watchdog kills the shell and the next call transparently
+ * opens a fresh one.</p>
  */
 public final class RootShell {
 
@@ -50,6 +69,22 @@ public final class RootShell {
 
     private final AtomicBoolean checking = new AtomicBoolean(false);
     private final CopyOnWriteArrayList<String> extraPaths = new CopyOnWriteArrayList<>();
+
+    /** Serialises every command that runs inside the shared session. */
+    private final Object execLock = new Object();
+    private final AtomicLong sequence = new AtomicLong();
+    /** How many times a {@code su} process was spawned since the app started. */
+    private final AtomicInteger suInvocations = new AtomicInteger();
+
+    private final ScheduledExecutorService watchdog =
+            Executors.newSingleThreadScheduledExecutor(runnable -> {
+                Thread t = new Thread(runnable, "applens-su-watchdog");
+                t.setDaemon(true);
+                return t;
+            });
+
+    private volatile Session session;
+    private volatile boolean sessionUnsupported;
 
     private volatile boolean rootGranted;
     private volatile boolean rootAttempted;
@@ -107,6 +142,21 @@ public final class RootShell {
     }
 
     /**
+     * Number of {@code su} processes AppLens has started since launch. One for the
+     * shared session plus one per long running stream (logcat / inotifyd / tcpdump)
+     * — shown in the diagnostics so superuser-toast noise can be verified.
+     */
+    public int suInvocations() {
+        return suInvocations.get();
+    }
+
+    /** True while the shared root shell is alive. */
+    public boolean hasLiveSession() {
+        Session local = session;
+        return local != null && local.alive();
+    }
+
+    /**
      * Attempts to obtain a root session. The first successful negotiation is cached,
      * which is what makes the "grant once, works forever" behaviour of Magisk /
      * KernelSU apply here.
@@ -121,8 +171,13 @@ public final class RootShell {
     }
 
     private boolean ensureRootLocked(boolean forceRetry) {
-        if (rootGranted) {
+        if (rootGranted && !forceRetry) {
             return true;
+        }
+        if (forceRetry) {
+            closeSession();
+            rootGranted = false;
+            sessionUnsupported = false;
         }
         // Cache the result so scans do not repeatedly trigger superuser prompts.
         // An explicit tap can retry after the user changes the Magisk policy.
@@ -193,9 +248,26 @@ public final class RootShell {
             return SuAttempt.UNAVAILABLE;
         }
         try {
-            // `su -c id -u` prints exactly `0` when elevated. Allow enough time for
-            // Magisk/KernelSU/APatch's first-time authorization dialog to be answered.
-            String out = runSu(candidate, "id -u", ROOT_REQUEST_TIMEOUT_MS);
+            // Opening the session *is* the superuser request. Allow enough time for
+            // the Magisk/KernelSU/APatch authorization dialog to be answered.
+            Session opened = openSession(candidate, ROOT_REQUEST_TIMEOUT_MS);
+            if (opened != null) {
+                synchronized (execLock) {
+                    closeSessionLocked();
+                    session = opened;
+                }
+                workingSu = candidate;
+                rootGranted = true;
+                sessionUnsupported = false;
+                lastError = "";
+                Prefs.put(Prefs.K_ROOT_PATH, candidate);
+                detectManager();
+                return SuAttempt.GRANTED;
+            }
+            // The session could not be negotiated. Fall back to a classic one-shot
+            // request so devices with an unusual su still work (one toast per
+            // command there, which is why the session is always preferred).
+            String out = runOneShot(candidate, "id -u", ROOT_REQUEST_TIMEOUT_MS);
             if (out == null) {
                 // The executable was present but did not answer in time. Do not try
                 // another alias and accidentally open a second authorization prompt.
@@ -206,8 +278,10 @@ public final class RootShell {
             if ("0".equals(identity) || identity.startsWith("uid=0(")) {
                 workingSu = candidate;
                 rootGranted = true;
+                sessionUnsupported = true;
                 lastError = "";
                 Prefs.put(Prefs.K_ROOT_PATH, candidate);
+                detectManager();
                 return SuAttempt.GRANTED;
             }
             lastError = "Superuser access was not granted";
@@ -237,6 +311,258 @@ public final class RootShell {
         }
     }
 
+    /** Names the superuser manager without asking for a second authorization. */
+    private void detectManager() {
+        try {
+            String probe = exec("command -v magisk >/dev/null 2>&1 && echo magisk; "
+                    + "command -v ksud >/dev/null 2>&1 && echo kernelsu; "
+                    + "command -v apd >/dev/null 2>&1 && echo apatch", 6000);
+            if (probe == null || probe.trim().isEmpty()) {
+                manager = "su";
+                return;
+            }
+            if (probe.contains("magisk")) {
+                manager = "Magisk";
+            } else if (probe.contains("kernelsu")) {
+                manager = "KernelSU";
+            } else if (probe.contains("apatch")) {
+                manager = "APatch";
+            } else {
+                manager = "su";
+            }
+        } catch (Throwable ignored) {
+            manager = "su";
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // The shared su session
+    // ------------------------------------------------------------------
+
+    /** One long lived {@code su} shell; commands are fed through its stdin. */
+    private final class Session {
+
+        private final String su;
+        private final Process process;
+        private final Writer stdin;
+        private final BufferedReader stdout;
+        private final StringBuilder errors = new StringBuilder();
+        private volatile boolean dead;
+
+        Session(String su, Process process) {
+            this.su = su;
+            this.process = process;
+            this.stdin = new OutputStreamWriter(process.getOutputStream(), StandardCharsets.UTF_8);
+            this.stdout = new BufferedReader(
+                    new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8), 1 << 16);
+            Thread pump = new Thread(new Runnable() {
+                @Override
+                public void run() {
+                    BufferedReader err = new BufferedReader(new InputStreamReader(
+                            process.getErrorStream(), StandardCharsets.UTF_8), 8192);
+                    try {
+                        String line;
+                        while ((line = err.readLine()) != null) {
+                            synchronized (errors) {
+                                if (errors.length() > 8192) {
+                                    errors.setLength(0);
+                                }
+                                errors.append(line).append('\n');
+                            }
+                        }
+                    } catch (Throwable ignored) {
+                        // the shell is gone
+                    }
+                }
+            }, "applens-su-stderr");
+            pump.setDaemon(true);
+            pump.start();
+        }
+
+        boolean alive() {
+            if (dead) {
+                return false;
+            }
+            try {
+                return process.isAlive();
+            } catch (Throwable t) {
+                return false;
+            }
+        }
+
+        String drainErrors() {
+            synchronized (errors) {
+                String text = errors.toString();
+                errors.setLength(0);
+                return text;
+            }
+        }
+
+        void kill() {
+            dead = true;
+            try {
+                stdin.close();
+            } catch (Throwable ignored) {
+                // noop
+            }
+            destroy(process);
+        }
+
+        /**
+         * Runs one command and returns its stdout, or null when the shell died or
+         * the command outlived {@code timeoutMs}. {@code exitCode} (optional, size
+         * 1) receives the status.
+         */
+        String run(String command, int timeoutMs, int[] exitCode) {
+            if (dead) {
+                return null;
+            }
+            String marker = "__APPLENS_" + sequence.incrementAndGet() + "_"
+                    + Long.toHexString(System.nanoTime()) + "__";
+            ScheduledFuture<?> killer = null;
+            try {
+                killer = watchdog.schedule(new Runnable() {
+                    @Override
+                    public void run() {
+                        // A command that never returns takes the shell with it; the
+                        // next caller transparently negotiates a new one.
+                        lastError = "Root command timed out (" + su + "): "
+                                + Fmt.limit(command.replace('\n', ' '), 90);
+                        kill();
+                    }
+                }, Math.max(1000, timeoutMs), TimeUnit.MILLISECONDS);
+
+                stdin.write(command);
+                stdin.write("\n");
+                stdin.write("echo " + marker + " $?\n");
+                stdin.flush();
+
+                StringBuilder out = new StringBuilder();
+                int total = 0;
+                while (true) {
+                    String line = stdout.readLine();
+                    if (line == null) {
+                        dead = true;
+                        String stderr = drainErrors().trim();
+                        if (!stderr.isEmpty()) {
+                            lastError = Fmt.limit(stderr, 200);
+                        }
+                        return null;
+                    }
+                    // The marker can land on the same line as output that did not
+                    // end with a newline, so it is searched for, not matched.
+                    int at = line.indexOf(marker);
+                    if (at >= 0) {
+                        if (at > 0 && total <= MAX_OUTPUT) {
+                            out.append(line, 0, at).append('\n');
+                        }
+                        if (exitCode != null && exitCode.length > 0) {
+                            exitCode[0] = parseStatus(line.substring(at + marker.length()));
+                        }
+                        break;
+                    }
+                    total += line.length() + 1;
+                    if (total <= MAX_OUTPUT) {
+                        out.append(line).append('\n');
+                    }
+                }
+                return out.toString();
+            } catch (Throwable t) {
+                dead = true;
+                return null;
+            } finally {
+                if (killer != null) {
+                    killer.cancel(false);
+                }
+            }
+        }
+
+        private int parseStatus(String text) {
+            try {
+                return Integer.parseInt(text.trim());
+            } catch (Throwable t) {
+                return -1;
+            }
+        }
+    }
+
+    /** Starts an interactive root shell and verifies that it really is root. */
+    private Session openSession(String candidate, int timeoutMs) {
+        Process process = null;
+        try {
+            ProcessBuilder pb = new ProcessBuilder(argv(candidate));
+            pb.redirectErrorStream(false);
+            process = pb.start();
+            suInvocations.incrementAndGet();
+            Session opened = new Session(candidate, process);
+            String token = "__APPLENS_ROOT_OK__";
+            String probe = opened.run("echo " + token + " $(id -u)", timeoutMs, null);
+            if (probe == null || !probe.contains(token + " 0")) {
+                opened.kill();
+                return null;
+            }
+            // A predictable shell: C locale, no pager, no command echo.
+            opened.run("export LANG=C; export LC_ALL=C; umask 022; true", 5000, null);
+            return opened;
+        } catch (Throwable t) {
+            if (process != null) {
+                destroy(process);
+            }
+            return null;
+        }
+    }
+
+    private static List<String> argv(String candidate) {
+        List<String> parts = new ArrayList<>();
+        for (String p : candidate.trim().split("\\s+")) {
+            if (!p.isEmpty()) {
+                parts.add(p);
+            }
+        }
+        if (parts.isEmpty()) {
+            parts.add("su");
+        }
+        return parts;
+    }
+
+    /** Must be called with {@link #execLock} held. */
+    private void closeSessionLocked() {
+        Session local = session;
+        session = null;
+        if (local != null) {
+            local.kill();
+        }
+    }
+
+    private void closeSession() {
+        synchronized (execLock) {
+            closeSessionLocked();
+        }
+    }
+
+    /** Must be called with {@link #execLock} held. */
+    private Session sessionLocked() {
+        Session local = session;
+        if (local != null && local.alive()) {
+            return local;
+        }
+        if (local != null) {
+            local.kill();
+            session = null;
+        }
+        if (sessionUnsupported || workingSu.isEmpty()) {
+            return null;
+        }
+        Session fresh = openSession(workingSu, ROOT_REQUEST_TIMEOUT_MS);
+        if (fresh == null) {
+            // Keep working through one-shot invocations rather than losing root.
+            sessionUnsupported = true;
+            return null;
+        }
+        session = fresh;
+        return fresh;
+    }
+
     // ------------------------------------------------------------------
     // Command execution
     // ------------------------------------------------------------------
@@ -247,13 +573,7 @@ public final class RootShell {
     }
 
     public String exec(String cmd, int timeoutMs) {
-        if (cmd == null || cmd.isEmpty()) {
-            return null;
-        }
-        if (!ensureRoot()) {
-            return null;
-        }
-        String out = runSu(workingSu, cmd, timeoutMs);
+        String out = execRaw(cmd, timeoutMs);
         return out == null ? null : out.trim();
     }
 
@@ -262,7 +582,7 @@ public final class RootShell {
         if (cmd == null || cmd.isEmpty() || !ensureRoot()) {
             return null;
         }
-        return runSu(workingSu, cmd, timeoutMs);
+        return runRoot(cmd, timeoutMs, null);
     }
 
     /** Runs a command without root. */
@@ -275,20 +595,17 @@ public final class RootShell {
         return out != null && !out.isEmpty() && !"0".equals(out.trim());
     }
 
+    /** Runs {@code cmd} and returns its exit status, or -1 when it could not run. */
     public int statusOf(String cmd) {
-        String out = exec(cmd + "; echo __rc=$?");
+        if (cmd == null || cmd.isEmpty() || !ensureRoot()) {
+            return -1;
+        }
+        int[] status = new int[]{-1};
+        String out = runRoot(cmd, 15000, status);
         if (out == null) {
             return -1;
         }
-        int idx = out.lastIndexOf("__rc=");
-        if (idx < 0) {
-            return -1;
-        }
-        try {
-            return Integer.parseInt(out.substring(idx + 5).trim());
-        } catch (NumberFormatException e) {
-            return -1;
-        }
+        return status[0];
     }
 
     public List<String> execLines(String cmd) {
@@ -307,13 +624,62 @@ public final class RootShell {
         return out;
     }
 
-    private String runSu(String candidate, String cmd, int timeoutMs) {
-        List<String> parts = new ArrayList<>();
-        for (String p : candidate.split(" ")) {
-            parts.add(p);
+    /**
+     * The single entry point for root commands: the shared session when it is
+     * available, a one-shot {@code su -c} otherwise.
+     */
+    private String runRoot(String cmd, int timeoutMs, int[] exitCode) {
+        synchronized (execLock) {
+            Session live = sessionLocked();
+            if (live != null) {
+                String out = live.run(cmd, timeoutMs, exitCode);
+                if (out != null) {
+                    return out;
+                }
+                // The shell died mid-command (timeout, su revoked, OOM). Retry once
+                // on a brand new session before giving up.
+                closeSessionLocked();
+                Session retry = sessionLocked();
+                if (retry != null) {
+                    out = retry.run(cmd, timeoutMs, exitCode);
+                    if (out != null) {
+                        return out;
+                    }
+                    closeSessionLocked();
+                }
+            }
         }
+        if (workingSu.isEmpty()) {
+            return null;
+        }
+        if (exitCode == null || exitCode.length == 0) {
+            return runOneShot(workingSu, cmd, timeoutMs);
+        }
+        // One-shot shells cannot report the status out of band, so it is appended
+        // to the output and stripped again — the command still runs exactly once.
+        String marker = "__APPLENS_RC_" + sequence.incrementAndGet() + "__";
+        String out = runOneShot(workingSu, cmd + "\necho " + marker + " $?", timeoutMs);
+        if (out == null) {
+            return null;
+        }
+        int idx = out.lastIndexOf(marker);
+        if (idx < 0) {
+            exitCode[0] = -1;
+            return out;
+        }
+        try {
+            exitCode[0] = Integer.parseInt(out.substring(idx + marker.length()).trim());
+        } catch (Throwable t) {
+            exitCode[0] = -1;
+        }
+        return out.substring(0, idx);
+    }
+
+    private String runOneShot(String candidate, String cmd, int timeoutMs) {
+        List<String> parts = argv(candidate);
         parts.add("-c");
         parts.add(cmd);
+        suInvocations.incrementAndGet();
         return runCommand(parts.toArray(new String[0]), timeoutMs);
     }
 
@@ -410,21 +776,23 @@ public final class RootShell {
     /**
      * Starts a long running root process and pumps its stdout into {@code sink}.
      * Returns the {@link Process} so the caller can terminate it, or null.
+     *
+     * <p>A stream needs a process of its own, so this is the only place besides the
+     * shared session that spawns {@code su}. Callers must therefore check that the
+     * tool actually exists before starting one.</p>
      */
     public Process startStream(String command, LineSink sink) {
-        if (!ensureRoot()) {
+        if (!ensureRoot() || command == null || command.trim().isEmpty()) {
             return null;
         }
         try {
-            List<String> parts = new ArrayList<>();
-            for (String p : workingSu.split(" ")) {
-                parts.add(p);
-            }
+            List<String> parts = argv(workingSu);
             parts.add("-c");
             parts.add(command);
             ProcessBuilder pb = new ProcessBuilder(parts);
             pb.redirectErrorStream(true);
             final Process proc = pb.start();
+            suInvocations.incrementAndGet();
             Thread reader = new Thread(new Runnable() {
                 @Override
                 public void run() {
@@ -467,23 +835,44 @@ public final class RootShell {
         if (!ensureRoot()) {
             return null;
         }
-        try {
-            List<String> parts = new ArrayList<>();
-            for (String p : workingSu.split(" ")) {
-                parts.add(p);
+        // Through the shared session (no extra superuser request) whenever base64
+        // is available, which it is on every Android with toybox.
+        String encoded = execRaw("base64 " + shQuote(path) + " 2>/dev/null", 20000);
+        if (encoded != null && !encoded.trim().isEmpty()) {
+            try {
+                byte[] data = android.util.Base64.decode(
+                        encoded.replace("\n", "").replace("\r", ""), android.util.Base64.DEFAULT);
+                if (data != null) {
+                    if (maxBytes > 0 && data.length > maxBytes) {
+                        byte[] cut = new byte[maxBytes];
+                        System.arraycopy(data, 0, cut, 0, maxBytes);
+                        return cut;
+                    }
+                    return data;
+                }
+            } catch (Throwable ignored) {
+                // fall through to the raw reader
             }
+        }
+        Process proc = null;
+        try {
+            List<String> parts = argv(workingSu);
             parts.add("-c");
             parts.add("cat " + shQuote(path));
             ProcessBuilder pb = new ProcessBuilder(parts);
             pb.redirectErrorStream(true);
-            Process proc = pb.start();
+            proc = pb.start();
+            suInvocations.incrementAndGet();
             ByteArrayOutputStream out = new ByteArrayOutputStream();
-            drain(proc.getInputStream(), out);
+            Thread reader = drain(proc.getInputStream(), out);
             try {
-                proc.waitFor(10000, java.util.concurrent.TimeUnit.MILLISECONDS);
+                if (!proc.waitFor(10000, java.util.concurrent.TimeUnit.MILLISECONDS)) {
+                    destroy(proc);
+                }
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
             }
+            joinQuietly(reader);
             byte[] data = out.toByteArray();
             if (maxBytes > 0 && data.length > maxBytes) {
                 byte[] cut = new byte[maxBytes];
@@ -492,6 +881,9 @@ public final class RootShell {
             }
             return data;
         } catch (Throwable t) {
+            if (proc != null) {
+                destroy(proc);
+            }
             return null;
         }
     }
@@ -520,18 +912,32 @@ public final class RootShell {
         if (!ensureRoot()) {
             return false;
         }
+        String eof = "APPLENS_EOF_" + Long.toHexString(sequence.incrementAndGet());
         String cmd = "mkdir -p " + shQuote(parentOf(path)) + " 2>/dev/null; cat > " + shQuote(path)
-                + " <<'APPLENS_EOF'\n" + content + "\nAPPLENS_EOF";
+                + " <<'" + eof + "'\n" + content + "\n" + eof;
         return statusOf(cmd) == 0;
     }
 
     public boolean appendFile(String path, String content) {
-        if (!ensureRoot()) {
+        return appendText(path, content, 15000);
+    }
+
+    /**
+     * Appends UTF-8 text to a file as root through the shared session, so the
+     * activity record can be flushed twice a second without a superuser request
+     * (and therefore a toast) per flush.
+     */
+    public boolean appendText(String path, String content, int timeoutMs) {
+        if (!ensureRoot() || content == null || content.isEmpty()) {
             return false;
         }
+        String eof = "APPLENS_EOF_" + Long.toHexString(sequence.incrementAndGet());
+        String body = content.endsWith("\n") ? content : content + "\n";
         String cmd = "mkdir -p " + shQuote(parentOf(path)) + " 2>/dev/null; cat >> " + shQuote(path)
-                + " <<'APPLENS_EOF'\n" + content + "\nAPPLENS_EOF";
-        return statusOf(cmd) == 0;
+                + " <<'" + eof + "'\n" + body + eof;
+        int[] status = new int[]{-1};
+        String out = runRoot(cmd, timeoutMs, status);
+        return out != null && status[0] == 0;
     }
 
     public boolean deleteRecursively(String path) {
@@ -539,9 +945,9 @@ public final class RootShell {
     }
 
     /**
-     * Appends arbitrary bytes to a file as root by streaming them through the shell's
-     * stdin. Unlike {@link #appendFile} this is safe for any content, which matters
-     * for the plain-text activity records written to /sdcard.
+     * Appends arbitrary bytes to a file as root by streaming them through a
+     * dedicated shell's stdin. Only used when the session is unavailable, because
+     * it costs one superuser request per call.
      */
     public boolean appendStdin(String path, byte[] data, int timeoutMs) {
         if (!ensureRoot() || data == null || data.length == 0) {
@@ -549,13 +955,11 @@ public final class RootShell {
         }
         Process proc = null;
         try {
-            List<String> parts = new ArrayList<>();
-            for (String p : workingSu.split(" ")) {
-                parts.add(p);
-            }
+            List<String> parts = argv(workingSu);
             parts.add("-c");
             parts.add("mkdir -p " + shQuote(parentOf(path)) + " 2>/dev/null; cat >> " + shQuote(path));
             proc = new ProcessBuilder(parts).start();
+            suInvocations.incrementAndGet();
             java.io.OutputStream os = proc.getOutputStream();
             os.write(data);
             os.flush();
@@ -621,52 +1025,50 @@ public final class RootShell {
         return out.isEmpty() ? null : out;
     }
 
-    public String logcat() {
-        if (logcatBinary.isEmpty()) {
-            String p = which("logcat");
-            logcatBinary = p == null ? "" : p;
+    /** Cached {@code which}; returns null (never "") when the tool is missing. */
+    private String cachedTool(String current, String binary) {
+        if (current == null) {
+            return null;
         }
-        return logcatBinary;
+        if (!current.isEmpty()) {
+            return current;
+        }
+        String found = which(binary);
+        return found == null ? "" : found;
+    }
+
+    private static String orNull(String value) {
+        return value == null || value.isEmpty() ? null : value;
+    }
+
+    public String logcat() {
+        logcatBinary = cachedTool(logcatBinary, "logcat");
+        return orNull(logcatBinary);
     }
 
     public String inotifyd() {
-        if (inotifyBinary.isEmpty()) {
-            String p = which("inotifyd");
-            inotifyBinary = p == null ? "" : p;
-        }
-        return inotifyBinary;
+        inotifyBinary = cachedTool(inotifyBinary, "inotifyd");
+        return orNull(inotifyBinary);
     }
 
     public String tcpdump() {
-        if (tcpdumpBinary.isEmpty()) {
-            String p = which("tcpdump");
-            tcpdumpBinary = p == null ? "" : p;
-        }
-        return tcpdumpBinary;
+        tcpdumpBinary = cachedTool(tcpdumpBinary, "tcpdump");
+        return orNull(tcpdumpBinary);
     }
 
     public String ps() {
-        if (psBinary.isEmpty()) {
-            String p = which("ps");
-            psBinary = p == null ? "" : p;
-        }
-        return psBinary;
+        psBinary = cachedTool(psBinary, "ps");
+        return orNull(psBinary);
     }
 
     public String du() {
-        if (duBinary.isEmpty()) {
-            String p = which("du");
-            duBinary = p == null ? "" : p;
-        }
-        return duBinary;
+        duBinary = cachedTool(duBinary, "du");
+        return orNull(duBinary);
     }
 
     public String busybox() {
-        if (busyboxPath.isEmpty()) {
-            String p = which("busybox");
-            busyboxPath = p == null ? "" : p;
-        }
-        return busyboxPath;
+        busyboxPath = cachedTool(busyboxPath, "busybox");
+        return orNull(busyboxPath);
     }
 
     public boolean hasBusyboxApplet(String applet) {

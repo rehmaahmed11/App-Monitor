@@ -54,7 +54,11 @@ public final class ByteCounter {
         if (rc != 0) {
             rc = root.statusOf("iptables -N " + chain);
         }
-        if (rc == 0 || root.exec("iptables -L " + chain + " -n >/dev/null 2>&1 && echo ok").equals("ok")) {
+        // exec() returns null when the command could not run at all, which used to
+        // throw a NullPointerException here — on the thread that boots monitoring,
+        // so the whole application went down the moment a session started.
+        String probe = root.exec("iptables -L " + chain + " -n >/dev/null 2>&1 && echo ok");
+        if (rc == 0 || "ok".equals(probe)) {
             iptablesInstalled = true;
             // output chain (upload) + connmark restore so reply traffic is counted as download
             root.exec("iptables -F " + chain + " 2>/dev/null");

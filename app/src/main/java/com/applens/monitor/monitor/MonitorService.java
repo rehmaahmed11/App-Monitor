@@ -13,8 +13,11 @@ import android.os.IBinder;
 
 import com.applens.monitor.R;
 import com.applens.monitor.core.Fmt;
+import com.applens.monitor.core.RootShell;
 import com.applens.monitor.log.ActivityLogWriter;
 import com.applens.monitor.log.DiagnosticLog;
+import com.applens.monitor.model.EventCategory;
+import com.applens.monitor.model.EventItem;
 import com.applens.monitor.ui.DetailActivity;
 
 /**
@@ -29,36 +32,46 @@ public class MonitorService extends Service {
     public static final String EXTRA_LABEL = "label";
     public static final String EXTRA_UID = "uid";
     public static final String EXTRA_VPN = "vpn";
+    public static final String EXTRA_LAUNCH = "launch";
 
     private static final String CHANNEL_ID = "applens_monitoring";
     private static final int NOTIFICATION_ID = 0xA11;
 
     private static volatile MonitorEngine engine;
 
-    private final java.util.concurrent.ExecutorService bootstrap =
+    /**
+     * Every start and every stop runs here, in submission order. It is static and
+     * never shut down on purpose: a "stop this session, start that one" tap
+     * destroys and recreates the service, and the old session's teardown (root
+     * streams, iptables chains) must still finish before the new session installs
+     * its own. A per-instance executor let the two overlap.
+     */
+    private static final java.util.concurrent.ExecutorService bootstrap =
             java.util.concurrent.Executors.newSingleThreadExecutor(runnable -> {
                 Thread t = new Thread(runnable, "applens-bootstrap");
                 t.setDaemon(true);
                 return t;
             });
 
-    private final Object engineLock = new Object();
-    private volatile String pendingPkg = "";
-    private volatile String pendingLabel = "";
-    private volatile int pendingUid = -1;
-
+    private static final Object engineLock = new Object();
     public static boolean isRunning() {
         MonitorEngine local = engine;
         return local != null && local.isRunning();
     }
 
     public static void start(Context ctx, String pkg, String label, int uid, boolean useVpn) {
+        start(ctx, pkg, label, uid, useVpn, false);
+    }
+
+    public static void start(Context ctx, String pkg, String label, int uid, boolean useVpn,
+                             boolean launchTarget) {
         Intent intent = new Intent(ctx, MonitorService.class);
         intent.setAction(ACTION_START);
         intent.putExtra(EXTRA_PKG, pkg);
         intent.putExtra(EXTRA_LABEL, label);
         intent.putExtra(EXTRA_UID, uid);
         intent.putExtra(EXTRA_VPN, useVpn);
+        intent.putExtra(EXTRA_LAUNCH, launchTarget);
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 ctx.startForegroundService(intent);
@@ -74,7 +87,13 @@ public class MonitorService extends Service {
         Intent intent = new Intent(ctx, MonitorService.class);
         intent.setAction(ACTION_STOP);
         try {
-            ctx.startService(intent);
+            // The service posts its notification on every path, so a foreground
+            // start is safe here and is the only form allowed from the background.
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                ctx.startForegroundService(intent);
+            } else {
+                ctx.startService(intent);
+            }
         } catch (Throwable ignored) {
             // noop
         }
@@ -88,8 +107,16 @@ public class MonitorService extends Service {
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
+        // Android kills the process with ForegroundServiceDidNotStartInTimeException
+        // if a service started through startForegroundService() does not post its
+        // notification, so this has to happen before any early return.
+        String pkg = intent == null ? null : intent.getStringExtra(EXTRA_PKG);
+        String label = intent == null ? null : intent.getStringExtra(EXTRA_LABEL);
+        startForegroundCompat(buildNotification(
+                label == null || label.isEmpty() ? MonitorHub.get().label : label,
+                pkg == null || pkg.isEmpty() ? MonitorHub.get().pkg : pkg));
         if (intent == null) {
-            stopSelf();
+            teardown();
             return START_NOT_STICKY;
         }
         String action = intent.getAction();
@@ -97,42 +124,158 @@ public class MonitorService extends Service {
             teardown();
             return START_NOT_STICKY;
         }
-        String pkg = intent.getStringExtra(EXTRA_PKG);
-        String label = intent.getStringExtra(EXTRA_LABEL);
         int uid = intent.getIntExtra(EXTRA_UID, -1);
         boolean useVpn = intent.getBooleanExtra(EXTRA_VPN, true);
+        boolean launchTarget = intent.getBooleanExtra(EXTRA_LAUNCH, false);
         if (pkg == null || pkg.isEmpty()) {
-            stopSelf();
+            teardown();
             return START_NOT_STICKY;
         }
-        pendingPkg = pkg;
-        pendingLabel = label;
-        pendingUid = uid;
-        startForegroundCompat(buildNotification(label, pkg));
+        // A session that dies without a Java exception (ANR kill, low memory, a
+        // force stop) leaves this breadcrumb behind; the next launch turns it into
+        // a diagnostics entry instead of an empty report screen.
+        DiagnosticLog.beginSession("monitoring " + pkg + (useVpn ? " with DNS capture" : ""));
         if (useVpn) {
             startVpn(pkg, label, uid);
         }
+        final boolean shouldLaunch = launchTarget;
+        final String targetPkg = pkg;
+        final String targetLabel = label;
+        final int targetUid = uid;
+        // The application context outlives this service instance, which matters
+        // because the task below is queued behind the previous session's teardown.
+        final Context app = getApplicationContext();
         // Opening the record file and negotiating the root session spawns processes,
         // so it must not happen on the service main thread.
         bootstrap.execute(new Runnable() {
             @Override
             public void run() {
-                MonitorEngine local;
-                synchronized (engineLock) {
-                    if (engine == null) {
-                        engine = new MonitorEngine(MonitorService.this, pendingPkg,
-                                pendingLabel, pendingUid);
+                try {
+                    MonitorEngine local;
+                    synchronized (engineLock) {
+                        if (engine == null) {
+                            engine = new MonitorEngine(app, targetPkg, targetLabel, targetUid);
+                        }
+                        local = engine;
                     }
-                    local = engine;
+                    if (!local.isRunning()) {
+                        ActivityLogWriter.get().open(app, targetPkg, targetLabel);
+                        local.start();
+                    }
+                    MonitorHub.get().publishState();
+                    if (shouldLaunch) {
+                        launchTarget(app, targetPkg);
+                    }
+                } catch (Throwable error) {
+                    // Monitoring must degrade, never crash: a sampler that cannot
+                    // start is a diagnostics entry, not a dead application.
+                    DiagnosticLog.recordProblem("Monitoring could not be started for "
+                            + targetPkg, error);
+                    MonitorHub.get().publishState();
                 }
-                if (!local.isRunning()) {
-                    ActivityLogWriter.get().open(MonitorService.this, pendingPkg, pendingLabel);
-                    local.start();
-                }
-                MonitorHub.get().publishState();
             }
         });
         return START_STICKY;
+    }
+
+    /**
+     * Brings the monitored application to the front once the samplers are live, so
+     * its start-up is part of the record. The launcher intent is tried first and
+     * root {@code am start} is the fallback for apps without one.
+     */
+    private static void launchTarget(Context context, String pkg) {
+        if (pkg == null || pkg.isEmpty()) {
+            return;
+        }
+        boolean requested = false;
+        try {
+            Intent launch = context.getPackageManager().getLaunchIntentForPackage(pkg);
+            if (launch != null) {
+                launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK
+                        | Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED);
+                context.startActivity(launch);
+                requested = true;
+            }
+        } catch (Throwable ignored) {
+            // Background activity starts can be refused; the root path covers it.
+        }
+        if (requested) {
+            try {
+                Thread.sleep(1500);
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                return;
+            }
+            if (isTargetInFront(pkg)) {
+                report(pkg, "launcher intent");
+                return;
+            }
+        }
+        // Either the app has no launcher activity, or Android refused the start
+        // because the request came from a service. Root can always do it.
+        try {
+            RootShell root = RootShell.get();
+            if (!root.isRootGranted()) {
+                DiagnosticLog.recordThrottledProblem("launch-target",
+                        "Could not bring " + pkg + " to the foreground",
+                        new IllegalStateException("No launcher activity and no root access"));
+                return;
+            }
+            if (root.statusOf("monkey -p " + RootShell.shQuote(pkg)
+                    + " -c android.intent.category.LAUNCHER 1 >/dev/null 2>&1") == 0) {
+                report(pkg, "root monkey");
+                return;
+            }
+            root.exec("am start -n \"$(cmd package resolve-activity --brief "
+                    + RootShell.shQuote(pkg) + " | tail -1)\" >/dev/null 2>&1", 10000);
+            report(pkg, "root am start");
+        } catch (Throwable error) {
+            DiagnosticLog.recordThrottledProblem("launch-target",
+                    "Could not launch " + pkg, error);
+        }
+    }
+
+    /** Puts the launch in the activity feed and the record file. */
+    private static void report(String pkg, String how) {
+        try {
+            EventItem event = EventItem.of(EventCategory.ACTIVITY,
+                    "Application launched by AppLens",
+                    pkg + " was brought to the foreground after the monitors came up (" + how + ")",
+                    "MonitorService");
+            event.pkg = pkg;
+            MonitorHub.get().publish(event);
+            ActivityLogWriter.get().writeRaw(event.toLogLine(pkg));
+        } catch (Throwable ignored) {
+            // never let reporting break the launch
+        }
+    }
+
+    /**
+     * True when {@code pkg} owns the focused window. Android silently drops an
+     * activity start a service is not allowed to make, so the only way to know
+     * whether the launch worked is to look at what is actually on screen.
+     */
+    private static boolean isTargetInFront(String pkg) {
+        try {
+            RootShell root = RootShell.get();
+            if (!root.isRootGranted()) {
+                // Without root nothing better can be attempted anyway.
+                return true;
+            }
+            String focus = root.exec("dumpsys activity activities 2>/dev/null"
+                    + " | grep -m1 -E 'mResumedActivity|topResumedActivity'", 8000);
+            if (focus == null || focus.trim().isEmpty()) {
+                focus = root.exec("dumpsys window 2>/dev/null | grep -m1 mCurrentFocus", 8000);
+            }
+            if (focus == null || focus.trim().isEmpty()) {
+                // No answer: fall back to "is it running at all".
+                String pids = root.exec("pidof " + RootShell.shQuote(pkg) + " 2>/dev/null", 6000);
+                return pids != null && !pids.trim().isEmpty();
+            }
+            return focus.contains(pkg + "/");
+        } catch (Throwable ignored) {
+            return true;
+        }
     }
 
     private void startForegroundCompat(Notification notification) {
@@ -167,37 +310,81 @@ public class MonitorService extends Service {
     }
 
     private void teardown() {
-        pendingPkg = "";
+        final MonitorEngine stopping;
         synchronized (engineLock) {
-            if (engine != null) {
-                engine.stop();
-                engine = null;
-            }
+            stopping = engine;
+            engine = null;
         }
-        Intent vpn = new Intent(this, com.applens.monitor.net.DnsVpnService.class);
-        vpn.setAction(com.applens.monitor.net.DnsVpnService.ACTION_STOP);
+        stopVpn();
+        MonitorHub.get().end();
+        MonitorHub.get().publishState();
+        DiagnosticLog.endSession();
+        // Stopping the samplers tears down root streams and firewall counters and
+        // the final flush writes through root, so none of it may run on the main
+        // thread; the service itself goes away immediately.
+        closeSession(stopping);
         try {
-            startService(vpn);
+            stopForeground(true);
         } catch (Throwable ignored) {
             // noop
         }
-        ActivityLogWriter.get().flush();
-        MonitorHub.get().end();
-        MonitorHub.get().publishState();
-        stopForeground(true);
         stopSelf();
+    }
+
+    private void stopVpn() {
+        Intent vpn = new Intent(this, com.applens.monitor.net.DnsVpnService.class);
+        vpn.setAction(com.applens.monitor.net.DnsVpnService.ACTION_STOP);
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                startForegroundService(vpn);
+            } else {
+                startService(vpn);
+            }
+        } catch (Throwable ignored) {
+            // The capture service is already gone.
+        }
+    }
+
+    /** Stops a session on the shared worker, ahead of whatever starts next. */
+    private static void closeSession(final MonitorEngine stopping) {
+        try {
+            bootstrap.execute(new Runnable() {
+                @Override
+                public void run() {
+                    try {
+                        if (stopping != null) {
+                            stopping.stop();
+                        }
+                    } catch (Throwable error) {
+                        DiagnosticLog.recordProblem("Monitoring could not be stopped cleanly", error);
+                    }
+                    try {
+                        ActivityLogWriter.get().flush();
+                    } catch (Throwable error) {
+                        DiagnosticLog.recordThrottledProblem("record-flush",
+                                "The activity record could not be flushed", error);
+                    }
+                }
+            });
+        } catch (Throwable error) {
+            DiagnosticLog.recordProblem("Monitoring could not be stopped cleanly", error);
+        }
     }
 
     @Override
     public void onDestroy() {
-        bootstrap.shutdown();
+        // Android destroys the service as soon as stopSelf() is honoured, and that
+        // happens on the main thread — so the samplers are stopped on the worker,
+        // never here.
+        final MonitorEngine stopping;
         synchronized (engineLock) {
-            if (engine != null) {
-                engine.stop();
-                engine = null;
-            }
+            stopping = engine;
+            engine = null;
         }
-        MonitorHub.get().end();
+        if (stopping != null) {
+            closeSession(stopping);
+            MonitorHub.get().end();
+        }
         super.onDestroy();
     }
 
@@ -227,7 +414,7 @@ public class MonitorService extends Service {
 
     private Notification buildNotification(String label, String pkg) {
         MonitorState state = MonitorHub.get().stateSnapshot();
-        String title = Fmt.nz(label, pkg) + " is monitored";
+        String title = Fmt.nz(label, Fmt.nz(pkg, "An application")) + " is monitored";
         String text = Fmt.duration(state.elapsed()) + " · " + state.eventCount + " events · "
                 + Fmt.rate(state.downRate) + " down";
         Intent open = new Intent(this, DetailActivity.class)

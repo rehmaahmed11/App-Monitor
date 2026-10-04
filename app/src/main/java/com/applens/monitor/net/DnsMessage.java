@@ -121,6 +121,38 @@ public final class DnsMessage {
         }
     }
 
+    /**
+     * Builds a RCODE=2 (SERVFAIL) reply for {@code query}. Returning this when the
+     * upstream resolver cannot be reached lets the client fail immediately and fall
+     * back to its own path, instead of waiting out its full resolver timeout on a
+     * lookup AppLens silently dropped.
+     */
+    public static byte[] serverFailure(byte[] query) {
+        if (query == null || query.length < 12) {
+            return null;
+        }
+        try {
+            Message m = parse(query, 0, query.length);
+            ByteArrayOutputStream out = new ByteArrayOutputStream();
+            writeShort(out, m.id);
+            // QR=1, keep the opcode/RD bits of the request, RCODE=2 (server failure)
+            writeShort(out, ((m.flags & 0x7900) | 0x8080 | 0x0002) & 0xFFFF);
+            Question q = m.primary();
+            writeShort(out, q == null ? 0 : 1);
+            writeShort(out, 0);
+            writeShort(out, 0);
+            writeShort(out, 0);
+            if (q != null) {
+                writeName(out, q.name);
+                writeShort(out, q.type);
+                writeShort(out, q.clazz);
+            }
+            return out.toByteArray();
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
     public static Message parse(byte[] buf, int offset, int length) {
         Message m = new Message();
         if (buf == null || length < 12) {
