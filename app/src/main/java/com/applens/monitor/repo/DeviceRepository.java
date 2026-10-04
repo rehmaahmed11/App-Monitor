@@ -295,9 +295,16 @@ public final class DeviceRepository {
             BatteryManager bm = (BatteryManager) ctx.getSystemService(Context.BATTERY_SERVICE);
             if (bm != null) {
                 int level = bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY);
-                int temp = bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_TEMPERATURE);
-                p.add(H, R.drawable.ic_chip, "Battery", level + "%" + (temp != Integer.MIN_VALUE
-                        ? " · " + (temp / 10f) + "°C" : ""));
+                String extra = "";
+                android.content.Intent battery = ctx.registerReceiver(null,
+                        new android.content.IntentFilter(android.content.Intent.ACTION_BATTERY_CHANGED));
+                if (battery != null) {
+                    int temp = battery.getIntExtra(android.os.BatteryManager.EXTRA_TEMPERATURE, 0);
+                    int plug = battery.getIntExtra(android.os.BatteryManager.EXTRA_PLUGGED, -1);
+                    extra = " · " + (temp / 10f) + "°C · "
+                            + (plug == 0 ? "discharging" : "charging");
+                }
+                p.add(H, R.drawable.ic_chip, "Battery", level + "%" + extra);
             }
         } catch (Throwable ignored) {
             // no battery service

@@ -84,7 +84,7 @@ public class DnsVpnService extends VpnService {
     }
 
     public static long queryCount() {
-        return QUERY_COUNTER;
+        return QUERY_COUNTER.get();
     }
 
     private static final AtomicLong QUERY_COUNTER = new AtomicLong();
@@ -280,7 +280,7 @@ public class DnsVpnService extends VpnService {
 
     private void forwardQuery(byte[] original, String srcIp, String dstIp, int srcPort,
                               int dstPort, int tos, byte[] query) {
-        DnsMessage request = DnsMessage.parse(query, 0, query.length);
+        DnsMessage.Message request = DnsMessage.parse(query, 0, query.length);
         DnsMessage.Question question = request.primary();
         String domain = question == null ? "" : question.name;
         long now = System.currentTimeMillis();
@@ -312,7 +312,7 @@ public class DnsVpnService extends VpnService {
         return uid > 0 && clientUid == uid;
     }
 
-    private void record(String domain, DnsMessage.Question question, DnsMessage message,
+    private void record(String domain, DnsMessage.Question question, DnsMessage.Message message,
                         String clientIp, String server, int clientUid, String transport,
                         String toS, long time, boolean queryOnly) {
         if (domain == null || domain.isEmpty()) {
@@ -666,7 +666,7 @@ public class DnsVpnService extends VpnService {
                 if (length <= 0 || p + 2 + length > end) {
                     break;
                 }
-                DnsMessage message = DnsMessage.parse(buf, p + 2, length);
+                DnsMessage.Message message = DnsMessage.parse(buf, p + 2, length);
                 DnsMessage.Question q = message.primary();
                 if (q != null) {
                     ActivityLogWriter.get().writeRaw(Fmt.clock(System.currentTimeMillis())
