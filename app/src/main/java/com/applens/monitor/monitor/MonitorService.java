@@ -9,10 +9,14 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.pm.ServiceInfo;
 import android.os.Build;
+import android.os.Handler;
 import android.os.IBinder;
+import android.os.Looper;
 
 import com.applens.monitor.R;
 import com.applens.monitor.core.Fmt;
+import com.applens.monitor.core.LogSettings;
+import com.applens.monitor.core.Prefs;
 import com.applens.monitor.core.RootShell;
 import com.applens.monitor.log.ActivityLogWriter;
 import com.applens.monitor.log.DiagnosticLog;
@@ -20,9 +24,23 @@ import com.applens.monitor.model.EventCategory;
 import com.applens.monitor.model.EventItem;
 import com.applens.monitor.ui.DetailActivity;
 
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicLong;
+
 /**
  * Foreground service that keeps a monitoring session alive while the user browses
  * other screens. Also owns the DNS capture VPN lifecycle.
+ *
+ * <p><b>One request, one lifecycle.</b> Starting a session while another one runs
+ * (or while a stop is still being processed) used to be expressed as two intents,
+ * "stop" followed by "start", which raced with the service's own destruction: the
+ * stop's {@code stopSelf()} could take the freshly started session down with it,
+ * and {@code onDestroy()} stopped whichever engine happened to be current. Every
+ * request now carries a sequence number; a request only acts when it is still the
+ * newest one, teardown uses {@code stopSelf(startId)} so a newer start survives,
+ * and a session that is killed by the system is picked back up instead of being
+ * silently dropped after a few seconds.</p>
  */
 public class MonitorService extends Service {
 
@@ -33,11 +51,22 @@ public class MonitorService extends Service {
     public static final String EXTRA_UID = "uid";
     public static final String EXTRA_VPN = "vpn";
     public static final String EXTRA_LAUNCH = "launch";
+    public static final String EXTRA_REASON = "reason";
 
     private static final String CHANNEL_ID = "applens_monitoring";
     private static final int NOTIFICATION_ID = 0xA11;
+    /** A stored session older than this is not resumed after a process restart. */
+    private static final long RESUME_WINDOW_MS = 6 * 60 * 60 * 1000L;
 
     private static volatile MonitorEngine engine;
+
+    // ------------------------------------------------------------------
+    // Request sequencing
+    // ------------------------------------------------------------------
+
+    private static final AtomicLong SEQUENCE = new AtomicLong();
+    /** Id of the newest start/stop request; older requests abort when they differ. */
+    private static volatile long newestRequest;
 
     /**
      * Every start and every stop runs here, in submission order. It is static and
@@ -46,17 +75,45 @@ public class MonitorService extends Service {
      * streams, iptables chains) must still finish before the new session installs
      * its own. A per-instance executor let the two overlap.
      */
-    private static final java.util.concurrent.ExecutorService bootstrap =
-            java.util.concurrent.Executors.newSingleThreadExecutor(runnable -> {
+    private static final ExecutorService bootstrap =
+            Executors.newSingleThreadExecutor(runnable -> {
                 Thread t = new Thread(runnable, "applens-bootstrap");
                 t.setDaemon(true);
                 return t;
             });
 
+    private final Handler main = new Handler(Looper.getMainLooper());
+    /** True once this instance asked to go away; used by onDestroy(). */
+    private volatile boolean stopping;
+    private int lastStartId;
+
+    private final Runnable ticker = new Runnable() {
+        @Override
+        public void run() {
+            MonitorState state = MonitorHub.get().stateSnapshot();
+            if (state.phase == MonitorState.Phase.RUNNING
+                    || state.phase == MonitorState.Phase.STARTING) {
+                refreshNotification(state);
+            }
+            boolean live = state.phase != MonitorState.Phase.IDLE;
+            if (live || !stopping) {
+                // Keep ticking while live and for one extra beat after a stop so
+                // the final "stopped" notification is not left behind.
+                main.postDelayed(this, 1000);
+            }
+        }
+    };
+
     private static final Object engineLock = new Object();
+
     public static boolean isRunning() {
         MonitorEngine local = engine;
         return local != null && local.isRunning();
+    }
+
+    /** The phase the UI should render; safe to call from any thread. */
+    public static MonitorState.Phase phase() {
+        return MonitorHub.get().phase();
     }
 
     public static void start(Context ctx, String pkg, String label, int uid, boolean useVpn) {
@@ -65,6 +122,23 @@ public class MonitorService extends Service {
 
     public static void start(Context ctx, String pkg, String label, int uid, boolean useVpn,
                              boolean launchTarget) {
+        Intent intent = buildIntent(ctx, pkg, label, uid, useVpn, launchTarget);
+        send(ctx, intent);
+    }
+
+    public static void stop(Context ctx) {
+        stop(ctx, "stopped by user");
+    }
+
+    public static void stop(Context ctx, String reason) {
+        Intent intent = new Intent(ctx, MonitorService.class);
+        intent.setAction(ACTION_STOP);
+        intent.putExtra(EXTRA_REASON, reason);
+        send(ctx, intent);
+    }
+
+    private static Intent buildIntent(Context ctx, String pkg, String label, int uid,
+                                      boolean useVpn, boolean launchTarget) {
         Intent intent = new Intent(ctx, MonitorService.class);
         intent.setAction(ACTION_START);
         intent.putExtra(EXTRA_PKG, pkg);
@@ -72,6 +146,10 @@ public class MonitorService extends Service {
         intent.putExtra(EXTRA_UID, uid);
         intent.putExtra(EXTRA_VPN, useVpn);
         intent.putExtra(EXTRA_LAUNCH, launchTarget);
+        return intent;
+    }
+
+    private static void send(Context ctx, Intent intent) {
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 ctx.startForegroundService(intent);
@@ -79,23 +157,11 @@ public class MonitorService extends Service {
                 ctx.startService(intent);
             }
         } catch (Throwable error) {
-            DiagnosticLog.recordProblem("Could not start the monitoring service", error);
-        }
-    }
-
-    public static void stop(Context ctx) {
-        Intent intent = new Intent(ctx, MonitorService.class);
-        intent.setAction(ACTION_STOP);
-        try {
-            // The service posts its notification on every path, so a foreground
-            // start is safe here and is the only form allowed from the background.
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                ctx.startForegroundService(intent);
-            } else {
-                ctx.startService(intent);
-            }
-        } catch (Throwable ignored) {
-            // noop
+            // Android 12+ refuses a foreground-service start from the background;
+            // record it instead of dying with an uncaught exception.
+            DiagnosticLog.recordProblem("Could not reach the monitoring service", error);
+            MonitorHub.get().markFailed("the system refused to start the monitoring service: "
+                    + LogSettings.describe(error));
         }
     }
 
@@ -107,82 +173,175 @@ public class MonitorService extends Service {
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
+        lastStartId = startId;
+        stopping = false;
         // Android kills the process with ForegroundServiceDidNotStartInTimeException
         // if a service started through startForegroundService() does not post its
         // notification, so this has to happen before any early return.
         String pkg = intent == null ? null : intent.getStringExtra(EXTRA_PKG);
         String label = intent == null ? null : intent.getStringExtra(EXTRA_LABEL);
-        startForegroundCompat(buildNotification(
+        boolean foreground = startForegroundCompat(buildNotification(
                 label == null || label.isEmpty() ? MonitorHub.get().label : label,
                 pkg == null || pkg.isEmpty() ? MonitorHub.get().pkg : pkg));
-        if (intent == null) {
-            teardown();
+        if (!foreground) {
+            // Without a foreground service Android tears the process down within
+            // seconds. Stopping cleanly is the honest outcome here; the reason is
+            // shown on the dashboard and recorded in the diagnostics.
+            MonitorHub.get().markFailed("the monitoring notification could not be posted "
+                    + "(foreground service refused)");
+            stopSelf(startId);
             return START_NOT_STICKY;
+        }
+        startTicker();
+
+        if (intent == null) {
+            // The system restarted the service after a kill (low memory, battery
+            // optimiser, force stop). Resume the stored session when there is one,
+            // otherwise there is nothing to continue.
+            if (!resumeStoredSession()) {
+                teardown("the session was interrupted and could not be resumed", startId);
+            }
+            return START_STICKY;
         }
         String action = intent.getAction();
         if (ACTION_STOP.equals(action)) {
-            teardown();
+            String reason = intent.getStringExtra(EXTRA_REASON);
+            teardown(reason == null || reason.isEmpty() ? "stopped by user" : reason, startId);
+            return START_NOT_STICKY;
+        }
+        if (pkg == null || pkg.isEmpty()) {
+            teardown("no application was selected", startId);
             return START_NOT_STICKY;
         }
         int uid = intent.getIntExtra(EXTRA_UID, -1);
-        boolean useVpn = intent.getBooleanExtra(EXTRA_VPN, true);
+        boolean useVpn = intent.getBooleanExtra(EXTRA_VPN, LogSettings.dnsCapture());
         boolean launchTarget = intent.getBooleanExtra(EXTRA_LAUNCH, false);
-        if (pkg == null || pkg.isEmpty()) {
-            teardown();
-            return START_NOT_STICKY;
+        requestStart(pkg, label, uid, useVpn, launchTarget);
+        return START_STICKY;
+    }
+
+    // ------------------------------------------------------------------
+    // Starting
+    // ------------------------------------------------------------------
+
+    private void requestStart(final String pkg, final String label, final int uid,
+                              final boolean useVpn, final boolean launchTarget) {
+        final long request = SEQUENCE.incrementAndGet();
+        newestRequest = request;
+        MonitorHub hub = MonitorHub.get();
+        MonitorEngine current = engine;
+        boolean sameSession = current != null && pkg.equals(hub.pkg)
+                && (current.isRunning() || hub.phase() == MonitorState.Phase.STARTING);
+        if (sameSession) {
+            // Already this application's session (running, or still coming up): a
+            // second tap must not restart it, and a stop that was cancelled by this
+            // very start must not leave the UI stuck on "stopping".
+            if (current.isRunning() && hub.phase() != MonitorState.Phase.RUNNING) {
+                hub.markRunning();
+            }
+            hub.publishStateNow();
+            return;
         }
-        // A session that dies without a Java exception (ANR kill, low memory, a
-        // force stop) leaves this breadcrumb behind; the next launch turns it into
-        // a diagnostics entry instead of an empty report screen.
+        hub.begin(pkg, label, uid);
+        hub.publishStateNow();
         DiagnosticLog.beginSession("monitoring " + pkg + (useVpn ? " with DNS capture" : ""));
+        rememberSession(pkg, label, uid, useVpn);
         if (useVpn) {
             startVpn(pkg, label, uid);
         }
-        final boolean shouldLaunch = launchTarget;
-        final String targetPkg = pkg;
-        final String targetLabel = label;
-        final int targetUid = uid;
-        // The application context outlives this service instance, which matters
-        // because the task below is queued behind the previous session's teardown.
         final Context app = getApplicationContext();
-        // Opening the record file and negotiating the root session spawns processes,
-        // so it must not happen on the service main thread.
         bootstrap.execute(new Runnable() {
             @Override
             public void run() {
+                if (newestRequest != request) {
+                    // A stop or a newer start replaced this request while it was
+                    // queueing; acting now would resurrect a cancelled session.
+                    return;
+                }
+                MonitorEngine previous;
+                synchronized (engineLock) {
+                    previous = engine;
+                    engine = null;
+                }
+                if (previous != null) {
+                    previous.setStopReason("replaced by a new monitoring session");
+                    try {
+                        previous.stop();
+                    } catch (Throwable error) {
+                        DiagnosticLog.recordProblem("The previous session did not stop cleanly",
+                                error);
+                    }
+                    ActivityLogWriter.get().close();
+                }
                 try {
-                    MonitorEngine local;
+                    String recordPath = ActivityLogWriter.get().open(app, pkg, label);
+                    MonitorHub hub = MonitorHub.get();
+                    hub.setRecord(recordPath, ActivityLogWriter.get().status());
+                    hub.publishStateNow();
+                    MonitorEngine local = new MonitorEngine(app, pkg, label, uid);
                     synchronized (engineLock) {
-                        if (engine == null) {
-                            engine = new MonitorEngine(app, targetPkg, targetLabel, targetUid);
-                        }
-                        local = engine;
+                        engine = local;
                     }
-                    if (!local.isRunning()) {
-                        ActivityLogWriter.get().open(app, targetPkg, targetLabel);
-                        local.start();
+                    if (newestRequest != request) {
+                        return;
                     }
-                    MonitorHub.get().publishState();
-                    if (shouldLaunch) {
-                        launchTarget(app, targetPkg);
+                    local.start();
+                    hub.publishStateNow();
+                    if (launchTarget) {
+                        launchTarget(app, pkg);
                     }
                 } catch (Throwable error) {
                     // Monitoring must degrade, never crash: a sampler that cannot
                     // start is a diagnostics entry, not a dead application.
-                    DiagnosticLog.recordProblem("Monitoring could not be started for "
-                            + targetPkg, error);
-                    MonitorHub.get().publishState();
+                    DiagnosticLog.recordProblem("Monitoring could not be started for " + pkg,
+                            error);
+                    MonitorHub.get().markFailed("monitoring could not be started: "
+                            + LogSettings.describe(error));
+                    MonitorHub.get().publishStateNow();
                 }
             }
         });
-        return START_STICKY;
     }
 
     /**
-     * Brings the monitored application to the front once the samplers are live, so
-     * its start-up is part of the record. The launcher intent is tried first and
-     * root {@code am start} is the fallback for apps without one.
+     * True when a session was remembered and is still recent enough to continue.
+     * Called for the null-intent restart Android performs on START_STICKY.
      */
+    private boolean resumeStoredSession() {
+        String pkg = Prefs.str(Prefs.K_SESSION_PKG, "");
+        if (pkg == null || pkg.isEmpty()) {
+            return false;
+        }
+        long started = Prefs.sp().getLong(Prefs.K_SESSION_STARTED, 0L);
+        if (started <= 0 || System.currentTimeMillis() - started > RESUME_WINDOW_MS) {
+            Prefs.clearSession();
+            return false;
+        }
+        MonitorEngine current = engine;
+        if (current != null && current.isRunning() && pkg.equals(MonitorHub.get().pkg)) {
+            return true;
+        }
+        String label = Prefs.str(Prefs.K_SESSION_LABEL, pkg);
+        int uid = Prefs.integer(Prefs.K_SESSION_UID, -1);
+        boolean vpn = Prefs.bool(Prefs.K_SESSION_VPN, LogSettings.dnsCapture());
+        MonitorHub.get().publish(EventItem.of(EventCategory.SYSTEM, "Session resumed",
+                "AppLens was restarted by the system and picked the session for " + pkg
+                        + " back up", "MonitorService"));
+        requestStart(pkg, label, uid, vpn, false);
+        return true;
+    }
+
+    private static void rememberSession(String pkg, String label, int uid, boolean useVpn) {
+        Prefs.sp().edit()
+                .putString(Prefs.K_SESSION_PKG, pkg)
+                .putString(Prefs.K_SESSION_LABEL, label == null ? pkg : label)
+                .putInt(Prefs.K_SESSION_UID, uid)
+                .putBoolean(Prefs.K_SESSION_VPN, useVpn)
+                .putLong(Prefs.K_SESSION_STARTED, System.currentTimeMillis())
+                .apply();
+    }
+
+    /** Brings the monitored application to the front once the samplers are live. */
     private static void launchTarget(Context context, String pkg) {
         if (pkg == null || pkg.isEmpty()) {
             return;
@@ -278,62 +437,70 @@ public class MonitorService extends Service {
         }
     }
 
-    private void startForegroundCompat(Notification notification) {
-        try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-                startForeground(NOTIFICATION_ID, notification,
-                        ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE);
-            } else {
-                startForeground(NOTIFICATION_ID, notification);
-            }
-        } catch (Throwable error) {
-            DiagnosticLog.recordProblem("Could not start the monitoring foreground service", error);
-        }
-    }
+    // ------------------------------------------------------------------
+    // Stopping
+    // ------------------------------------------------------------------
 
-    private void startVpn(String pkg, String label, int uid) {
-        Intent vpn = new Intent(this, com.applens.monitor.net.DnsVpnService.class);
-        vpn.setAction(com.applens.monitor.net.DnsVpnService.ACTION_START);
-        vpn.putExtra(com.applens.monitor.net.DnsVpnService.EXTRA_PKG, pkg);
-        vpn.putExtra(com.applens.monitor.net.DnsVpnService.EXTRA_LABEL, label);
-        vpn.putExtra(com.applens.monitor.net.DnsVpnService.EXTRA_UID, uid);
-        try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                startForegroundService(vpn);
-            } else {
-                startService(vpn);
+    /**
+     * Stops the session on the shared worker and lets this start request go away.
+     * {@code stopSelf(startId)} — not {@code stopSelf()} — so a start that arrived
+     * while the teardown was queueing keeps the service (and its session) alive.
+     */
+    private void teardown(final String reason, final int startId) {
+        final long request = SEQUENCE.incrementAndGet();
+        newestRequest = request;
+        stopping = true;
+        stopVpnIfRunning();
+        MonitorHub.get().markStopping();
+        MonitorHub.get().publishStateNow();
+        main.removeCallbacks(ticker);
+        bootstrap.execute(new Runnable() {
+            @Override
+            public void run() {
+                if (newestRequest != request) {
+                    // A new start superseded the stop while it was queueing.
+                    return;
+                }
+                MonitorEngine stopping;
+                synchronized (engineLock) {
+                    stopping = engine;
+                    engine = null;
+                }
+                if (stopping != null) {
+                    stopping.setStopReason(reason);
+                    try {
+                        stopping.stop();
+                    } catch (Throwable error) {
+                        DiagnosticLog.recordProblem("Monitoring could not be stopped cleanly", error);
+                    }
+                }
+                try {
+                    ActivityLogWriter writer = ActivityLogWriter.get();
+                    writer.flush();
+                    MonitorHub.get().setRecordBytes(writer.writtenBytes());
+                    writer.close();
+                } catch (Throwable error) {
+                    DiagnosticLog.recordThrottledProblem("record-flush",
+                            "The activity record could not be flushed", error);
+                }
+                Prefs.clearSession();
+                DiagnosticLog.endSession();
+                MonitorHub.get().end(reason);
+                MonitorHub.get().publishStateNow();
             }
-        } catch (Throwable error) {
-            DiagnosticLog.recordProblem("Could not start DNS capture VPN; monitoring may continue without it",
-                    error);
-        }
-    }
-
-    private void teardown() {
-        final MonitorEngine stopping;
-        synchronized (engineLock) {
-            stopping = engine;
-            engine = null;
-        }
-        stopVpn();
-        MonitorHub.get().end();
-        MonitorHub.get().publishState();
-        DiagnosticLog.endSession();
-        // Stopping the samplers tears down root streams and firewall counters and
-        // the final flush writes through root, so none of it may run on the main
-        // thread; the service itself goes away immediately.
-        closeSession(stopping);
+        });
         try {
             stopForeground(true);
         } catch (Throwable ignored) {
             // noop
         }
-        stopSelf();
+        stopSelf(startId);
     }
 
     private void stopVpn() {
         Intent vpn = new Intent(this, com.applens.monitor.net.DnsVpnService.class);
         vpn.setAction(com.applens.monitor.net.DnsVpnService.ACTION_STOP);
+        vpn.putExtra(com.applens.monitor.net.DnsVpnService.EXTRA_REASON, "the monitoring session ended");
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 startForegroundService(vpn);
@@ -345,52 +512,83 @@ public class MonitorService extends Service {
         }
     }
 
-    /** Stops a session on the shared worker, ahead of whatever starts next. */
-    private static void closeSession(final MonitorEngine stopping) {
-        try {
-            bootstrap.execute(new Runnable() {
-                @Override
-                public void run() {
-                    try {
-                        if (stopping != null) {
-                            stopping.stop();
-                        }
-                    } catch (Throwable error) {
-                        DiagnosticLog.recordProblem("Monitoring could not be stopped cleanly", error);
-                    }
-                    try {
-                        ActivityLogWriter.get().flush();
-                    } catch (Throwable error) {
-                        DiagnosticLog.recordThrottledProblem("record-flush",
-                                "The activity record could not be flushed", error);
-                    }
-                }
-            });
-        } catch (Throwable error) {
-            DiagnosticLog.recordProblem("Monitoring could not be stopped cleanly", error);
-        }
-    }
-
     @Override
     public void onDestroy() {
-        // Android destroys the service as soon as stopSelf() is honoured, and that
-        // happens on the main thread — so the samplers are stopped on the worker,
-        // never here.
-        final MonitorEngine stopping;
-        synchronized (engineLock) {
-            stopping = engine;
-            engine = null;
-        }
-        if (stopping != null) {
-            closeSession(stopping);
-            MonitorHub.get().end();
+        main.removeCallbacks(ticker);
+        if (!stopping) {
+            // The system destroyed the service without a stop request. If the
+            // process is still alive the samplers keep running and the service is
+            // brought straight back up, so the session is not cut off after a few
+            // seconds by a lifecycle hiccup.
+            MonitorEngine current = engine;
+            if (current != null && current.isRunning()) {
+                DiagnosticLog.recordThrottledProblem("service-restart",
+                        "The monitoring service was destroyed unexpectedly; restarting it",
+                        new IllegalStateException("onDestroy without a stop request"));
+                try {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                        startForegroundService(buildIntent(getApplicationContext(),
+                                MonitorHub.get().pkg, MonitorHub.get().label,
+                                MonitorHub.get().uid, dnsVpnRunning(), false));
+                    } else {
+                        startService(buildIntent(getApplicationContext(),
+                                MonitorHub.get().pkg, MonitorHub.get().label,
+                                MonitorHub.get().uid, dnsVpnRunning(), false));
+                    }
+                } catch (Throwable ignored) {
+                    // Android can refuse a background foreground-service start; the
+                    // samplers are still running and the next user action restores
+                    // the notification.
+                }
+            }
         }
         super.onDestroy();
+    }
+
+    private static boolean dnsVpnRunning() {
+        return com.applens.monitor.net.DnsVpnService.isRunning();
     }
 
     @Override
     public IBinder onBind(Intent intent) {
         return null;
+    }
+
+    // ------------------------------------------------------------------
+    // Notification
+    // ------------------------------------------------------------------
+
+    private void startTicker() {
+        main.removeCallbacks(ticker);
+        main.postDelayed(ticker, 1000);
+    }
+
+    /** Called once a second so the notification shows the live session. */
+    private void refreshNotification(MonitorState state) {
+        try {
+            NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
+            if (nm != null) {
+                nm.notify(NOTIFICATION_ID, buildNotification(state));
+            }
+        } catch (Throwable ignored) {
+            // the notification is decorative
+        }
+    }
+
+    /** @return false when the platform refused to put the service in the foreground. */
+    private boolean startForegroundCompat(Notification notification) {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                startForeground(NOTIFICATION_ID, notification,
+                        ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE);
+            } else {
+                startForeground(NOTIFICATION_ID, notification);
+            }
+            return true;
+        } catch (Throwable error) {
+            DiagnosticLog.recordProblem("Could not start the monitoring foreground service", error);
+            return false;
+        }
     }
 
     private void createChannel() {
@@ -413,10 +611,32 @@ public class MonitorService extends Service {
     }
 
     private Notification buildNotification(String label, String pkg) {
-        MonitorState state = MonitorHub.get().stateSnapshot();
+        return buildNotification(MonitorHub.get().stateSnapshot(), label, pkg);
+    }
+
+    private Notification buildNotification(MonitorState state) {
+        return buildNotification(state, MonitorHub.get().label, MonitorHub.get().pkg);
+    }
+
+    private Notification buildNotification(MonitorState state, String label, String pkg) {
         String title = Fmt.nz(label, Fmt.nz(pkg, "An application")) + " is monitored";
-        String text = Fmt.duration(state.elapsed()) + " · " + state.eventCount + " events · "
-                + Fmt.rate(state.downRate) + " down";
+        if (state.phase == MonitorState.Phase.STARTING) {
+            title = "Starting monitoring for " + Fmt.nz(label, Fmt.nz(pkg, "an application"));
+        } else if (state.phase == MonitorState.Phase.STOPPING) {
+            title = "Stopping monitoring for " + Fmt.nz(label, Fmt.nz(pkg, "an application"));
+        } else if (state.phase == MonitorState.Phase.IDLE) {
+            title = "AppLens monitoring stopped";
+        }
+        StringBuilder text = new StringBuilder();
+        if (state.phase == MonitorState.Phase.RUNNING) {
+            text.append(Fmt.duration(state.elapsed())).append(" · ")
+                    .append(state.eventCount).append(" events · ")
+                    .append(Fmt.rate(state.downRate)).append(" down");
+        } else if (state.phase == MonitorState.Phase.IDLE) {
+            text.append(state.stopReason.isEmpty() ? "No session running" : state.stopReason);
+        } else {
+            text.append("Preparing the monitors…");
+        }
         Intent open = new Intent(this, DetailActivity.class)
                 .putExtra(DetailActivity.EXTRA_PKG, pkg)
                 .putExtra(DetailActivity.EXTRA_LABEL, label)
@@ -427,12 +647,20 @@ public class MonitorService extends Service {
                 ? new Notification.Builder(this, CHANNEL_ID)
                 : new Notification.Builder(this);
         builder.setContentTitle(title)
-                .setContentText(text)
+                .setContentText(text.toString())
                 .setSmallIcon(R.drawable.ic_pulse)
-                .setOngoing(true)
+                .setOngoing(state.phase != MonitorState.Phase.IDLE)
                 .setOnlyAlertOnce(true)
                 .setContentIntent(pending);
-        Intent stop = new Intent(this, MonitorService.class).setAction(ACTION_STOP);
+        String record = state.recordPath;
+        if (record == null || record.isEmpty()) {
+            builder.setSubText(state.recordNote.isEmpty() ? "no record file" : state.recordNote);
+        } else {
+            builder.setSubText("record: " + record);
+        }
+        Intent stop = new Intent(this, MonitorService.class)
+                .setAction(ACTION_STOP)
+                .putExtra(EXTRA_REASON, "stopped from the notification");
         builder.addAction(new Notification.Action.Builder(
                 android.graphics.drawable.Icon.createWithResource(this, R.drawable.ic_stop),
                 "Stop", PendingIntent.getService(this, 1, stop,
@@ -445,4 +673,14 @@ public class MonitorService extends Service {
         return builder.build();
     }
 
+    /**
+     * Asks the capture VPN to go away. Only called while it is really up: starting
+     * the VPN service just to tell it to stop used to post a "preparing DNS
+     * capture" notification for a service that was never running.
+     */
+    private void stopVpnIfRunning() {
+        if (com.applens.monitor.net.DnsVpnService.isRunning()) {
+            stopVpn();
+        }
+    }
 }

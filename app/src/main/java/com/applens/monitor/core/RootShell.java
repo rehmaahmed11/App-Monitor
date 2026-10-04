@@ -944,6 +944,50 @@ public final class RootShell {
         return statusOf("rm -rf " + shQuote(path)) == 0;
     }
 
+    /** Outcome of a "create this folder and prove it is writable" check. */
+    public static final class Check {
+        public final boolean ok;
+        public final String path;
+        public final String note;
+
+        Check(boolean ok, String path, String note) {
+            this.ok = ok;
+            this.path = path == null ? "" : path;
+            this.note = note == null ? "" : note;
+        }
+    }
+
+    /**
+     * Creates {@code path} as root and writes a probe file inside it, so the caller
+     * knows the folder exists <em>and</em> that a report can really be written there
+     * (a missing SELinux context or a read-only volume would otherwise only show up
+     * as an empty report file much later).
+     */
+    public Check makeFolder(String path) {
+        if (path == null || path.isEmpty()) {
+            return new Check(false, path, "empty path");
+        }
+        if (!ensureRoot()) {
+            return new Check(false, path, "no root access");
+        }
+        String quoted = shQuote(path);
+        String probe = path + "/.applens_write_test";
+        int mkdir = statusOf("mkdir -p " + quoted + " 2>/dev/null");
+        if (mkdir != 0 && !exists(path)) {
+            String reason = statusOf("mkdir -p " + quoted) == 0 ? "" : "mkdir failed";
+            return new Check(false, path, reason.isEmpty() ? "folder not created" : reason);
+        }
+        if (!writeFile(probe, "AppLens write test")) {
+            return new Check(false, path, "probe file could not be written");
+        }
+        long size = fileSize(probe);
+        exec("rm -f " + shQuote(probe) + " 2>/dev/null");
+        if (size <= 0) {
+            return new Check(false, path, "probe file stayed empty");
+        }
+        return new Check(true, path, "root");
+    }
+
     /**
      * Appends arbitrary bytes to a file as root by streaming them through a
      * dedicated shell's stdin. Only used when the session is unavailable, because

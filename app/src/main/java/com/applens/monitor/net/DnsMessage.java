@@ -122,6 +122,28 @@ public final class DnsMessage {
     }
 
     /**
+     * Builds a recursive query for {@code name}/{@code type}. Used by the capture
+     * VPN to probe the device's resolvers before it takes over DNS at all.
+     */
+    public static byte[] query(String name, int type) {
+        try {
+            ByteArrayOutputStream out = new ByteArrayOutputStream();
+            writeShort(out, (int) (System.nanoTime() & 0xFFFF));
+            writeShort(out, 0x0100); // RD
+            writeShort(out, 1);
+            writeShort(out, 0);
+            writeShort(out, 0);
+            writeShort(out, 0);
+            writeName(out, name == null || name.isEmpty() ? "." : name);
+            writeShort(out, type);
+            writeShort(out, 1);
+            return out.toByteArray();
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    /**
      * Builds a RCODE=2 (SERVFAIL) reply for {@code query}. Returning this when the
      * upstream resolver cannot be reached lets the client fail immediately and fall
      * back to its own path, instead of waiting out its full resolver timeout on a

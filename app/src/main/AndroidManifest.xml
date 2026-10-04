@@ -72,6 +72,13 @@
             android:configChanges="orientation|screenSize|keyboardHidden|uiMode" />
 
         <activity
+            android:name=".ui.SettingsActivity"
+            android:exported="false"
+            android:parentActivityName=".ui.MainActivity"
+            android:configChanges="orientation|screenSize|keyboardHidden|uiMode"
+            android:windowSoftInputMode="adjustResize" />
+
+        <activity
             android:name=".ui.DiagnosticsActivity"
             android:exported="false"
             android:parentActivityName=".ui.MainActivity"

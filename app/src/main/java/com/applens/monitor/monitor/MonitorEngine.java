@@ -3,9 +3,11 @@ package com.applens.monitor.monitor;
 import android.content.Context;
 
 import com.applens.monitor.core.Fmt;
+import com.applens.monitor.core.LogSettings;
 import com.applens.monitor.core.RootShell;
 import com.applens.monitor.log.ActivityLogWriter;
 import com.applens.monitor.log.DiagnosticLog;
+import com.applens.monitor.log.SessionReport;
 import com.applens.monitor.model.ConnectionItem;
 import com.applens.monitor.model.EventCategory;
 import com.applens.monitor.model.EventItem;
@@ -57,6 +59,14 @@ public final class MonitorEngine {
     private long lastThrottleNotice;
 
     private ScheduledExecutorService scheduler;
+    /** Serialises the heavier report work (snapshot, heartbeat) off the samplers. */
+    private final java.util.concurrent.ExecutorService reportIo =
+            Executors.newSingleThreadExecutor(runnable -> {
+                Thread t = new Thread(runnable, "applens-report");
+                t.setDaemon(true);
+                return t;
+            });
+    private volatile String stopReason = "";
     private LogcatMonitor logcatMonitor;
     private FileWatchMonitor fileWatch;
     private TcpdumpMonitor tcpdump;
@@ -84,6 +94,7 @@ public final class MonitorEngine {
         hub.publish(EventItem.of(EventCategory.PROCESS, "Monitoring started",
                 "Target: " + label + " (" + pkg + "), uid " + uid, "AppLens"));
         ActivityLogWriter.get().writeRaw("--- monitoring session for " + pkg + " started ---");
+        syncRecordState();
 
         socketMonitor = new SocketMonitor(pkg);
         byteCounter = new ByteCounter(uid);
@@ -161,10 +172,67 @@ public final class MonitorEngine {
                 3000, BYTES_PERIOD_MS, TimeUnit.MILLISECONDS);
         scheduler.scheduleWithFixedDelay(this::sampleMemory,
                 5000, MEMORY_PERIOD_MS, TimeUnit.MILLISECONDS);
+        int heartbeatMinutes = LogSettings.heartbeatMinutes();
+        if (LogSettings.fullReport() && heartbeatMinutes > 0) {
+            long period = heartbeatMinutes * 60_000L;
+            scheduler.scheduleWithFixedDelay(this::heartbeat, period, period,
+                    TimeUnit.MILLISECONDS);
+        }
+        if (LogSettings.fullReport()) {
+            // The snapshot is heavy (dumpsys, du, device probe): it must never
+            // delay the launch of the monitored application.
+            reportIo.execute(new Runnable() {
+                @Override
+                public void run() {
+                    try {
+                        SessionReport.writeStart(context, pkg, label, uid,
+                                ActivityLogWriter.get().path());
+                    } catch (Throwable error) {
+                        DiagnosticLog.recordProblem("The start-of-session snapshot failed", error);
+                    }
+                }
+            });
+        }
+        hub.markRunning();
         hub.publishStateNow();
     }
 
+    /** Copies the writer's current path/status into the shared state for the UI. */
+    public void syncRecordState() {
+        ActivityLogWriter writer = ActivityLogWriter.get();
+        hub.setRecord(writer.path(), writer.status());
+        hub.setRecordBytes(writer.writtenBytes());
+    }
+
+    private void heartbeat() {
+        if (!running.get()) {
+            return;
+        }
+        try {
+            SessionReport.writeHeartbeat(pkg, hub.stateSnapshot(), hub.dnsRecords(),
+                    hub.connections());
+            syncRecordState();
+        } catch (Throwable error) {
+            DiagnosticLog.recordThrottledProblem("report-heartbeat",
+                    "The periodic report heartbeat failed", error);
+        }
+    }
+
     public void stop() {
+        stop(stopReason.isEmpty() ? "stopped" : stopReason);
+    }
+
+    /** Records why the session ends; the value is written into the summary. */
+    public void setStopReason(String reason) {
+        if (reason != null && !reason.isEmpty()) {
+            stopReason = reason;
+        }
+    }
+
+    public void stop(String reason) {
+        if (reason != null && !reason.isEmpty()) {
+            stopReason = reason;
+        }
         if (!running.compareAndSet(true, false)) {
             return;
         }
@@ -212,11 +280,23 @@ public final class MonitorEngine {
                 }
             }, "traffic counters");
         }
+        MonitorState state = hub.stateSnapshot();
         EventItem e = EventItem.of(EventCategory.PROCESS, "Monitoring stopped",
-                "Captured " + hub.stateSnapshot().eventCount + " events", "AppLens");
+                "Captured " + state.eventCount + " events (" + stopReason + ")", "AppLens");
         hub.publish(e);
-        ActivityLogWriter.get().writeRaw("--- monitoring session ended ---");
+        ActivityLogWriter.get().writeRaw("--- monitoring session ended: " + stopReason + " ---");
+        if (LogSettings.fullReport()) {
+            try {
+                ActivityLogWriter writer = ActivityLogWriter.get();
+                SessionReport.writeSummary(context, pkg, label, stopReason, state,
+                        hub.events(), hub.dnsRecords(), hub.connections(), hub.processes(),
+                        writer.path(), writer.writtenBytes());
+            } catch (Throwable error) {
+                DiagnosticLog.recordProblem("The session summary could not be written", error);
+            }
+        }
         ActivityLogWriter.get().flush();
+        syncRecordState();
         hub.publishStateNow();
     }
 
