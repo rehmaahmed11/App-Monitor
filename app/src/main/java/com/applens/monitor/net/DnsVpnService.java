@@ -288,6 +288,11 @@ public class DnsVpnService extends VpnService {
         pump.start();
         watchNetworks();
         enterForeground(statusLine());
+        try {
+            MonitorHub.get().addSource("vpn-dns");
+        } catch (Throwable ignored) {
+            // the source list is decorative
+        }
         publishVpnState();
         MonitorHub.get().publish(EventItem.of(EventCategory.DNS, "DNS capture online",
                 detail + ", MTU " + MTU, "VpnService"));
@@ -1339,10 +1344,25 @@ public class DnsVpnService extends VpnService {
 
     @Override
     public void onDestroy() {
+        boolean wasRunning = running;
         stop.set(true);
         running = false;
+        if (wasRunning) {
+            status = "stopped";
+        }
         closeTun();
         unregisterNetworkCallback();
+        // A destroyed service must not leave DNAT rules pointing at a dead loopback
+        // port; the same cleanup runs on every stop, and at app start as a backstop.
+        final Thread cleanup = new Thread(new Runnable() {
+            @Override
+            public void run() {
+                removeRelayRules();
+            }
+        }, "applens-vpn-cleanup");
+        cleanup.setDaemon(true);
+        cleanup.start();
+        publishVpnState();
         super.onDestroy();
     }
 

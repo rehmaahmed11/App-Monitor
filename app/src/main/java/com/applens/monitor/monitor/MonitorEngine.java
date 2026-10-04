@@ -298,6 +298,8 @@ public final class MonitorEngine {
         ActivityLogWriter.get().flush();
         syncRecordState();
         hub.publishStateNow();
+        // The engine is per session; its report thread must not outlive it.
+        reportIo.shutdown();
     }
 
     /** Shutting a sampler down must never prevent the next one from stopping. */
