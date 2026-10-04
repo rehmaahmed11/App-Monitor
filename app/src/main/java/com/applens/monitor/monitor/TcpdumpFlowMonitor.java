@@ -84,22 +84,32 @@ public final class TcpdumpFlowMonitor {
             right = right.substring(0, right.length() - 1);
         }
 
-        String[] leftParts = splitEndpoint(left);
-        String[] rightParts = splitEndpoint(right);
-        if (leftParts == null || rightParts == null) {
+        Endpoint from = splitEndpoint(left);
+        Endpoint to = splitEndpoint(right);
+        if (from == null || to == null) {
             return;
         }
         int length = parseLength(line);
         if (length < 0) {
             return;
         }
-        sink.onPacket(leftParts[0], leftParts[1], rightParts[0], rightParts[1],
-                v6 ? "TCP6" : "TCP", length, true);
-        sink.onPacket(rightParts[0], rightParts[1], leftParts[0], leftParts[1],
-                v6 ? "TCP6" : "TCP", length, false);
+        String proto = v6 ? "TCP6" : "TCP";
+        sink.onPacket(from.ip, from.port, to.ip, to.port, proto, length, true);
+        sink.onPacket(to.ip, to.port, from.ip, from.port, proto, length, false);
     }
 
-    private static String[] splitEndpoint(String value) {
+    /** An {@code address.port} pair as printed by tcpdump. */
+    private static final class Endpoint {
+        final String ip;
+        final int port;
+
+        Endpoint(String ip, int port) {
+            this.ip = ip;
+            this.port = port;
+        }
+    }
+
+    private static Endpoint splitEndpoint(String value) {
         if (value == null || value.isEmpty()) {
             return null;
         }
@@ -117,7 +127,7 @@ public final class TcpdumpFlowMonitor {
         if (portValue <= 0 || portValue > 65535) {
             return null;
         }
-        return new String[]{value.substring(0, colon), portValue};
+        return new Endpoint(value.substring(0, colon), portValue);
     }
 
     private static int parseLength(String line) {
