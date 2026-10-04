@@ -86,14 +86,31 @@ jobs:
 
       - name: Build debug and release APKs
         run: |
+          set -o pipefail
           gradle \
             --no-daemon \
             --stacktrace \
+            --continue \
             -PapplensStoreFile="${{ env.store_file }}" \
             -PapplensStorePassword="${{ env.store_password }}" \
             -PapplensKeyAlias="${{ env.key_alias }}" \
             -PapplensKeyPassword="${{ env.key_password }}" \
-            packageApkDebug packageApkRelease
+            packageApkDebug packageApkRelease 2>&1 | tee build-log.txt
+          status=${PIPESTATUS[0]}
+          {
+            echo "### Build log (exit $status)"
+            echo '```'
+            grep -nE "error:|warning: \[|FAILURE:|Execution failed|Caused by:|^\s+> |AAPT|Android resource" build-log.txt | head -120 || true
+            echo '```'
+            echo
+            echo "<details><summary>Last 200 lines</summary>"
+            echo
+            echo '```'
+            tail -n 200 build-log.txt
+            echo '```'
+            echo "</details>"
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit $status
 
       - name: List artifacts
         run: |

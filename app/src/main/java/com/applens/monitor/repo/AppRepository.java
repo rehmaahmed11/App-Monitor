@@ -92,31 +92,44 @@ public final class AppRepository {
 
     /** Reads the installer package name for every app in one root call. */
     public static void resolveInstallers(List<AppItem> items) {
-        if (items.isEmpty() || !RootShell.get().ensureRoot()) {
+        List<String> names = new ArrayList<>(items.size());
+        for (AppItem item : items) {
+            names.add(item.pkg);
+        }
+        resolveInstallerNames(names, items);
+    }
+
+    private static void resolveInstallerNames(List<String> packages, List<AppItem> items) {
+        if (packages.isEmpty() || !RootShell.get().ensureRoot()) {
             return;
         }
         StringBuilder sb = new StringBuilder();
         sb.append("for p in");
         int n = 0;
-        for (AppItem item : items) {
+        for (String pkg : packages) {
             if (n++ >= SIZE_CHUNK * 4) {
                 break;
             }
-            sb.append(' ').append(RootShell.shQuote(item.pkg));
+            sb.append(' ').append(RootShell.shQuote(pkg));
         }
         sb.append("; do printf '%s\\t' \"$p\"; cmd package list-packages -i \"$p\" 2>/dev/null | head -1; done");
         for (String line : RootShell.get().execLines(sb.toString(), 40000)) {
             String[] parts = line.split("\t");
-            if (parts.length >= 2) {
-                String installer = parts[1].trim();
-                if (installer.startsWith("package:")) {
-                    installer = installer.substring(8);
-                }
-                for (AppItem item : items) {
-                    if (item.pkg.equals(parts[0].trim())) {
-                        item.installer = installer;
-                        break;
-                    }
+            if (parts.length < 2) {
+                continue;
+            }
+            String pkg = parts[0].trim();
+            String installer = parts[1].trim();
+            if (installer.startsWith("package:")) {
+                installer = installer.substring(8);
+            }
+            if (installer.isEmpty()) {
+                continue;
+            }
+            for (AppItem item : items) {
+                if (item.pkg.equals(pkg)) {
+                    item.installer = installer;
+                    break;
                 }
             }
         }

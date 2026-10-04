@@ -11,7 +11,6 @@ import android.os.Looper;
 import android.view.View;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
-import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -66,6 +65,7 @@ public class DetailActivity extends Activity {
 
     private String pkg = "";
     private String label = "";
+    private String installer = "";
     private int uid = -1;
 
     private AppItem app;
@@ -157,10 +157,10 @@ public class DetailActivity extends Activity {
                 if (appOps != null) {
                     parsed.appOps.putAll(PackageFactsParser.parseAppOps(appOps));
                 }
-                if (loaded != null) {
-                    List<String> pkgs = new ArrayList<>();
-                    pkgs.add(pkg);
-                    AppRepository.resolveInstallers(pkgs);
+                if (loaded != null && installer.isEmpty()) {
+                    installer = Fmt.nz(RootShell.get().exec("cmd package list-packages -i "
+                            + RootShell.shQuote(pkg) + " 2>/dev/null | head -1")
+                            .replace("package:", "").trim(), "");
                 }
             } else if (loaded != null) {
                 parsed = new AppFacts();
@@ -177,9 +177,11 @@ public class DetailActivity extends Activity {
             }
             final AppItem finalApp = loaded;
             final AppFacts finalFacts = parsed;
+            final String finalInstaller = installer;
             main.post(() -> {
                 app = finalApp;
                 facts = finalFacts;
+                installer = finalInstaller;
                 if (app != null) {
                     if (uid <= 0) {
                         uid = app.uid;
@@ -189,7 +191,11 @@ public class DetailActivity extends Activity {
                     appPackage.setText(app.pkg);
                     appMeta.setText("v" + Fmt.nz(app.versionName, "?")
                             + " (" + app.versionCode + ") · uid " + app.uid
-                            + " · target SDK " + app.targetSdk);
+                            + " · target SDK " + app.targetSdk
+                            + (installer.isEmpty() ? "" : " · " + installer));
+                    if (!installer.isEmpty()) {
+                        app.installer = installer;
+                    }
                 } else {
                     appName.setText(label);
                     appPackage.setText(pkg);
@@ -299,11 +305,13 @@ public class DetailActivity extends Activity {
         }
         tabHost.removeAllViews();
         TabPage page = pages.get(index);
-        ScrollView scroll = page.view();
-        if (scroll.getParent() != null) {
-            ((android.view.ViewGroup) scroll.getParent()).removeView(scroll);
+        View content = page.view();
+        if (content.getParent() != null) {
+            ((android.view.ViewGroup) content.getParent()).removeView(content);
         }
-        tabHost.addView(scroll);
+        tabHost.addView(content, new android.widget.FrameLayout.LayoutParams(
+                android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                android.view.ViewGroup.LayoutParams.MATCH_PARENT));
         page.onShow();
     }
 
