@@ -1,0 +1,133 @@
+name: Build APK
+
+on:
+  push:
+    branches:
+      - main
+      - 'arena/**'
+      - 'feature/**'
+    tags:
+      - 'v*'
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build AppLens APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Gradle 8.7
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+
+      - name: Cache Android SDK
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.android
+          key: applens-gradle-${{ hashFiles('**/*.gradle', '**/gradle-wrapper.properties') }}
+          restore-keys: applens-gradle-
+
+      - name: Show environment
+        run: |
+          java -version
+          gradle --version
+          echo "ANDROID_HOME=${ANDROID_HOME:-unset}"
+
+      # A throwaway release key is generated so the release APK is always signed and
+      # installable out of the box. Supply a real keystore via repository secrets to
+      # override it (APPLENS_KEYSTORE_BASE64 / APPLENS_KEYSTORE_PASSWORD).
+      - name: Prepare signing key
+        id: signing
+        run: |
+          set -euo pipefail
+          mkdir -p keystore
+          if [ -n "${{ secrets.APPLENS_KEYSTORE_BASE64 }}" ]; then
+            echo "${{ secrets.APPLENS_KEYSTORE_BASE64 }}" | base64 -d > keystore/release.jks
+            echo "store_password=${{ secrets.APPLENS_KEYSTORE_PASSWORD }}" >> "$GITHUB_ENV"
+            echo "key_alias=${{ secrets.APPLENS_KEY_ALIAS }}" >> "$GITHUB_ENV"
+            echo "key_password=${{ secrets.APPLENS_KEY_PASSWORD }}" >> "$GITHUB_ENV"
+            echo "using=repository-secret" >> "$GITHUB_ENV"
+          else
+            keytool -genkeypair -v \
+              -keystore keystore/release.jks \
+              -alias applens \
+              -keyalg RSA -keysize 2048 -validity 10950 \
+              -storepass applens -keypass applens \
+              -dname "CN=AppLens, OU=Monitoring, O=AppLens, L=NA, S=NA, C=NA" > /dev/null
+            echo "store_password=applens" >> "$GITHUB_ENV"
+            echo "key_alias=applens" >> "$GITHUB_ENV"
+            echo "key_password=applens" >> "$GITHUB_ENV"
+            echo "using=ephemeral" >> "$GITHUB_ENV"
+          fi
+          echo "store_file=keystore/release.jks" >> "$GITHUB_ENV"
+
+      - name: Build debug and release APKs
+        run: |
+          gradle \
+            --no-daemon \
+            --stacktrace \
+            -PapplensStoreFile="${{ env.store_file }}" \
+            -PapplensStorePassword="${{ env.store_password }}" \
+            -PapplensKeyAlias="${{ env.key_alias }}" \
+            -PapplensKeyPassword="${{ env.key_password }}" \
+            packageApkDebug packageApkRelease
+
+      - name: List artifacts
+        run: |
+          ls -la app/build/artifacts
+          sha256sum app/build/artifacts/*.apk | tee app/build/artifacts/SHA256SUMS.txt
+
+      - name: Upload APK artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: AppLens-APK
+          path: |
+            app/build/artifacts/*.apk
+            app/build/artifacts/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 30
+
+      # Publish a real APK download link on version tags.
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: app/build/artifacts/*.apk
+          body: |
+            **AppLens ${{ github.ref_name }}** — native on-device application monitor.
+
+            Download `AppLens-release-*.apk`, install it on a rooted device, grant root once
+            and every record is written to `/sdcard/AppLens/`.
+
+      - name: Commit generated Gradle wrapper
+        if: always() && github.ref == 'refs/heads/main'
+        continue-on-error: true
+        run: |
+          gradle wrapper --gradle-version 8.7 --no-daemon
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add gradle/wrapper/gradle-wrapper.jar gradlew gradlew.bat || true
+          git diff --staged --quiet || git commit -m "chore: add Gradle wrapper" || true
