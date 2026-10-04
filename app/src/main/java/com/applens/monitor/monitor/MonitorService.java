@@ -131,9 +131,6 @@ public class MonitorService extends Service {
             teardown();
             return START_NOT_STICKY;
         }
-        pendingPkg = pkg;
-        pendingLabel = label;
-        pendingUid = uid;
         // A session that dies without a Java exception (ANR kill, low memory, a
         // force stop) leaves this breadcrumb behind; the next launch turns it into
         // a diagnostics entry instead of an empty report screen.
