@@ -63,6 +63,9 @@ Opens straight onto the **previously scanned** application list.
 * **Filter chips**: all · user · system · running · monitored.
 * **PREVIOUSLY SCANNED** chips jump back to the apps you already looked at.
 * The header chip shows root state — tap it to re-request root.
+* **DIAG** opens saved crash/error reports. If Android reports that AppLens crashed
+  or stopped unexpectedly, the report opens automatically the next time AppLens starts.
+* **TXT** continues to browse and share the per-app activity record files.
 
 ### 2.2 Application detail
 
@@ -118,6 +121,23 @@ Root            : granted via su
 Open the **TXT** button on the dashboard to browse, open or share the records.
 Files are written through root into the shared volume; without root AppLens falls
 back to its own external directory (and offers all-files access on Android 11+).
+
+### 2.4 Crash and error diagnostics
+
+Tap **DIAG** on the dashboard to open the diagnostic window; new reports appear
+there while it is open. Fatal Java crashes are written synchronously before Android
+handles the crash. On Android 11 and newer,
+AppLens also checks the OS process history for crashes, ANRs, native failures and
+low-memory kills that do not reach the Java crash handler. A small number of
+unexpected errors that the app handles (such as a failed monitor sampler or root
+command) are saved there too, with repeated sampler errors rate-limited.
+
+After a crash/problem, AppLens opens the diagnostic window on the next launch. Use
+**COPY ALL** to put the saved text on the clipboard and paste it into a support
+message; **CLEAR** deletes it. Reports stay in AppLens's private app storage, are
+bounded to 512 KiB and are never uploaded automatically. They include device/app
+version and stack details, so review the text before sharing. Clearing reports does
+not affect the separate activity records under `/sdcard/AppLens`.
 
 ---
 
@@ -218,7 +238,8 @@ app/src/main/java/com/applens/monitor/
 ├── net/        DnsVpnService    capture VPN + TCP/DoT loopback relay
 │               DnsMessage       DNS wire format parser/builder
 ├── log/        ActivityLogWriter   plain-text records on shared storage
-├── ui/         MainActivity DetailActivity LogsActivity
+│               DiagnosticLog      bounded local crash/error reports + crash hook
+├── ui/         MainActivity DetailActivity LogsActivity DiagnosticsActivity
 │               tabs/            Overview Permissions Activity Network Dns Data
 │                              Access Timeline
 │               widget/          SparklineView RingView

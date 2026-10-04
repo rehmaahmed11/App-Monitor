@@ -5,6 +5,7 @@ import android.content.Context;
 import com.applens.monitor.core.Fmt;
 import com.applens.monitor.core.RootShell;
 import com.applens.monitor.log.ActivityLogWriter;
+import com.applens.monitor.log.DiagnosticLog;
 import com.applens.monitor.model.ConnectionItem;
 import com.applens.monitor.model.EventCategory;
 import com.applens.monitor.model.EventItem;
@@ -229,8 +230,9 @@ public final class MonitorEngine {
                 socketInodes.clear();
                 socketInodes.addAll(ProcessRepository.socketInodes(pkg));
             }
-        } catch (Throwable ignored) {
-            // sampling must never crash the service
+        } catch (Throwable error) {
+            DiagnosticLog.recordThrottledProblem("monitor-process-sample",
+                    "Process monitor sampler failed", error);
         }
     }
 
@@ -262,8 +264,9 @@ public final class MonitorEngine {
                 }
             }
             hub.markClosedExcept(live);
-        } catch (Throwable ignored) {
-            // ignore
+        } catch (Throwable error) {
+            DiagnosticLog.recordThrottledProblem("monitor-socket-sample",
+                    "Network connection sampler failed", error);
         }
     }
 
@@ -323,8 +326,9 @@ public final class MonitorEngine {
             ByteCounter.Sample sample = byteCounter.sample(read, write);
             hub.setBytes(sample.up, sample.down, sample.upRate, sample.downRate, sample.source);
             hub.publishState();
-        } catch (Throwable ignored) {
-            // ignore
+        } catch (Throwable error) {
+            DiagnosticLog.recordThrottledProblem("monitor-byte-sample",
+                    "Traffic counter sampler failed", error);
         }
     }
 
@@ -359,8 +363,9 @@ public final class MonitorEngine {
                     break;
                 }
             }
-        } catch (Throwable ignored) {
-            // ignore
+        } catch (Throwable error) {
+            DiagnosticLog.recordThrottledProblem("monitor-memory-sample",
+                    "Memory monitor sampler failed", error);
         }
     }
 

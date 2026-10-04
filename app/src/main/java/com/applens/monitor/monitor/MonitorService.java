@@ -14,6 +14,7 @@ import android.os.IBinder;
 import com.applens.monitor.R;
 import com.applens.monitor.core.Fmt;
 import com.applens.monitor.log.ActivityLogWriter;
+import com.applens.monitor.log.DiagnosticLog;
 import com.applens.monitor.ui.DetailActivity;
 
 /**
@@ -64,8 +65,8 @@ public class MonitorService extends Service {
             } else {
                 ctx.startService(intent);
             }
-        } catch (Throwable ignored) {
-            // the UI surfaces a warning if this fails
+        } catch (Throwable error) {
+            DiagnosticLog.recordProblem("Could not start the monitoring service", error);
         }
     }
 
@@ -142,8 +143,8 @@ public class MonitorService extends Service {
             } else {
                 startForeground(NOTIFICATION_ID, notification);
             }
-        } catch (Throwable ignored) {
-            // still return START_STICKY so the engine keeps running
+        } catch (Throwable error) {
+            DiagnosticLog.recordProblem("Could not start the monitoring foreground service", error);
         }
     }
 
@@ -159,8 +160,9 @@ public class MonitorService extends Service {
             } else {
                 startService(vpn);
             }
-        } catch (Throwable ignored) {
-            // DNS capture falls back to /proc based observation
+        } catch (Throwable error) {
+            DiagnosticLog.recordProblem("Could not start DNS capture VPN; monitoring may continue without it",
+                    error);
         }
     }
 

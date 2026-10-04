@@ -21,6 +21,7 @@ import com.applens.monitor.core.Fmt;
 import com.applens.monitor.core.Prefs;
 import com.applens.monitor.core.RootShell;
 import com.applens.monitor.log.ActivityLogWriter;
+import com.applens.monitor.log.DiagnosticLog;
 import com.applens.monitor.model.AppItem;
 import com.applens.monitor.repo.AppRepository;
 import com.applens.monitor.repo.ProcessRepository;
@@ -120,6 +121,8 @@ public class MainActivity extends Activity {
         sortButton.setOnClickListener(v -> showSortMenu());
         rootChip.setOnClickListener(v -> requestRoot(true));
         findViewById(R.id.scanButton).setOnClickListener(v -> startScan());
+        findViewById(R.id.diagnosticsButton).setOnClickListener(v ->
+                startActivity(new Intent(this, DiagnosticsActivity.class)));
         findViewById(R.id.logsButton).setOnClickListener(v ->
                 startActivity(new Intent(this, LogsActivity.class)));
 
@@ -143,6 +146,16 @@ public class MainActivity extends Activity {
             refreshRunningState();
         }
         requestRoot(false);
+        if (DiagnosticLog.consumePendingReport()) {
+            main.post(() -> {
+                if (isFinishing() || isDestroyed()) {
+                    return;
+                }
+                Intent diagnostics = new Intent(this, DiagnosticsActivity.class);
+                diagnostics.putExtra(DiagnosticsActivity.EXTRA_RECOVERED_REPORT, true);
+                startActivity(diagnostics);
+            });
+        }
     }
 
     private static final int REQ_NOTIFY = 77;

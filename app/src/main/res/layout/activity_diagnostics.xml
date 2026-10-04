@@ -1,0 +1,134 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:background="@color/bg"
+    android:fitsSystemWindows="true">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:paddingStart="12dp"
+        android:paddingEnd="18dp"
+        android:paddingTop="10dp"
+        android:paddingBottom="8dp">
+
+        <ImageView
+            android:id="@+id/backButton"
+            android:layout_width="40dp"
+            android:layout_height="40dp"
+            android:padding="10dp"
+            android:src="@drawable/ic_close"
+            android:contentDescription="@string/back"
+            android:clickable="true"
+            android:focusable="true" />
+
+        <LinearLayout
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:layout_marginStart="4dp"
+            android:orientation="vertical">
+
+            <TextView
+                style="@style/T.headline"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Diagnostics" />
+
+            <TextView
+                android:id="@+id/diagnosticMeta"
+                style="@style/T.small"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="3dp"
+                android:text="NO REPORTS · SAVED ON THIS DEVICE ONLY" />
+        </LinearLayout>
+    </LinearLayout>
+
+    <TextView
+        style="@style/T.small"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:paddingStart="18dp"
+        android:paddingEnd="18dp"
+        android:paddingBottom="10dp"
+        android:text="Crash reports and unexpected app errors are kept privately on this device. Copy all to send a report. Review before sharing; details may include package names and local paths." />
+
+    <TextView
+        android:id="@+id/recentIssueBanner"
+        style="@style/T.body"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="14dp"
+        android:layout_marginEnd="14dp"
+        android:layout_marginBottom="10dp"
+        android:padding="12dp"
+        android:background="@drawable/bg_button_stop"
+        android:textColor="@color/danger"
+        android:text="A recent crash or problem was detected. Its details are saved below."
+        android:visibility="gone" />
+
+    <ScrollView
+        android:id="@+id/diagnosticScroll"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:layout_marginStart="14dp"
+        android:layout_marginEnd="14dp"
+        android:layout_marginBottom="10dp"
+        android:fillViewport="true"
+        android:scrollbars="vertical">
+
+        <TextView
+            android:id="@+id/diagnosticText"
+            style="@style/T.mono"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:minHeight="180dp"
+            android:background="@drawable/bg_card_inner"
+            android:padding="14dp"
+            android:textColor="@color/text_dim"
+            android:textIsSelectable="true"
+            android:text="No diagnostics have been saved yet." />
+    </ScrollView>
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:paddingStart="16dp"
+        android:paddingEnd="16dp"
+        android:paddingTop="2dp"
+        android:paddingBottom="14dp">
+
+        <TextView
+            android:id="@+id/copyDiagnostics"
+            style="@style/T.label"
+            android:layout_width="0dp"
+            android:layout_height="46dp"
+            android:layout_weight="1"
+            android:gravity="center"
+            android:background="@drawable/bg_button_primary"
+            android:textColor="#FF04121A"
+            android:clickable="true"
+            android:focusable="true"
+            android:text="COPY ALL" />
+
+        <TextView
+            android:id="@+id/clearDiagnostics"
+            style="@style/T.label"
+            android:layout_width="100dp"
+            android:layout_height="46dp"
+            android:layout_marginStart="10dp"
+            android:gravity="center"
+            android:background="@drawable/bg_button_ghost"
+            android:textColor="@color/danger"
+            android:clickable="true"
+            android:focusable="true"
+            android:text="CLEAR" />
+    </LinearLayout>
+</LinearLayout>

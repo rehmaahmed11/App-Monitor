@@ -240,15 +240,29 @@
             android:text="SCAN APPS" />
 
         <TextView
-            android:id="@+id/logsButton"
+            android:id="@+id/diagnosticsButton"
             style="@style/T.label"
-            android:layout_width="52dp"
+            android:layout_width="68dp"
             android:layout_height="46dp"
-            android:layout_marginStart="10dp"
+            android:layout_marginStart="8dp"
             android:gravity="center"
             android:background="@drawable/bg_button_ghost"
             android:clickable="true"
             android:focusable="true"
+            android:contentDescription="Open crash and error diagnostics"
+            android:text="DIAG" />
+
+        <TextView
+            android:id="@+id/logsButton"
+            style="@style/T.label"
+            android:layout_width="52dp"
+            android:layout_height="46dp"
+            android:layout_marginStart="8dp"
+            android:gravity="center"
+            android:background="@drawable/bg_button_ghost"
+            android:clickable="true"
+            android:focusable="true"
+            android:contentDescription="Open activity record files"
             android:text="TXT" />
     </LinearLayout>
 </LinearLayout>
