@@ -27,6 +27,8 @@
     <color name="text">#FFE8F0F7</color>
     <color name="text_dim">#FF9AAAB9</color>
     <color name="text_faint">#FF5F6E7D</color>
+    <!-- Label colour for text placed on top of the accent/primary button gradient. -->
+    <color name="text_on_primary">#FF04121A</color>
     <color name="white">#FFFFFFFF</color>
     <color name="black">#FF000000</color>
     <color name="transparent">#00000000</color>

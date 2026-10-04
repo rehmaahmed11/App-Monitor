@@ -414,7 +414,9 @@ public class DetailActivity extends Activity {
         monitorButton.setText(mine ? getString(R.string.stop_monitoring)
                 : getString(R.string.start_monitoring));
         monitorButton.setBackgroundResource(mine ? R.drawable.bg_button_stop : R.drawable.bg_button_primary);
-        monitorButton.setTextColor(UiKit.color(this, mine ? R.color.danger : 0xFF04121A));
+        // The label sits on top of the accent gradient: dark navy when idle, danger red while
+        // monitoring. Always pass a colour *resource* here, never a raw ARGB literal — see UiKit.color.
+        monitorButton.setTextColor(UiKit.color(this, mine ? R.color.danger : R.color.text_on_primary));
     }
 
     // ------------------------------------------------------------------
