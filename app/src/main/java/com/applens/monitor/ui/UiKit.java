@@ -36,31 +36,31 @@ public final class UiKit {
     }
 
     /**
-     * Resolves a colour, accepting either a colour resource id (the documented contract) or a
-     * raw ARGB literal. The literal form used to be indistinguishable from a resource id here,
-     * so a stray {@code 0xFF04121A} resolved through {@code Resources.getColor()} threw
-     * {@link android.content.res.Resources.NotFoundException} and killed the whole activity.
-     * Callers should still prefer colour resources, so that themes stay in one place.
+     * Resolves a colour, accepting either a colour resource id (the documented contract) or a raw
+     * ARGB literal. Callers should pass resources so the palette stays in one place
+     * ({@code res/values/colors.xml}); literals are tolerated because the two forms are
+     * indistinguishable at the call site and mixing them up used to throw
+     * {@link android.content.res.Resources.NotFoundException} out of {@code onCreate}, taking the
+     * whole screen down with it (see {@code DetailActivity.updateMonitorButton}).
      */
     public static int color(Context ctx, int res) {
-        if ((res >>> 24) != 0) {
-            // High byte set: this is an ARGB literal, not an id from aapt (ids live in 0x7f…).
+        if (res < 0) {
+            // Alpha ≥ 0x80: a raw ARGB literal. aapt ids are always positive (0x01…–0x7f…),
+            // so nothing that resolves to a resource can ever land in this branch.
             return res;
         }
         try {
             return ctx.getResources().getColor(res, ctx.getTheme());
         } catch (Throwable t) {
-            // Last-resort net: a bad colour reference must never take a whole screen down at
-            // onCreate time. Record it so it still shows up in DIAG instead of only in a crash.
-            DiagnosticLog.recordThrottledProblem("uikit-color",
-                    "Unknown colour resource 0x" + Integer.toHexString(res)
-                            + " fell back to the default text colour", t);
-            return FALLBACK_COLOR;
+            // Either a low-alpha ARGB literal or an id that cannot be resolved. Honour the value
+            // as a literal so a colour can never crash a screen, and record it for DIAG so the
+            // mistake is still visible instead of silently repainting the UI.
+            DiagnosticLog.recordThrottledProblem("uikit-color", "Colour 0x"
+                    + Integer.toHexString(res) + " is not a resolvable resource id; used as a raw"
+                    + " ARGB value", t);
+            return res;
         }
     }
-
-    /** Readable on the app's dark surfaces; used only when a colour cannot be resolved. */
-    private static final int FALLBACK_COLOR = Color.rgb(0x9A, 0xAA, 0xB9);
 
     public static TextView text(Context ctx, String value, float sp, int colorRes) {
         TextView tv = new TextView(ctx);
