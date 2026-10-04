@@ -1,0 +1,12 @@
+// Top-level build file for the AppLens Android application.
+//
+// AppLens intentionally depends on **nothing but the Android framework itself**
+// (zero third-party libraries). That keeps the APK tiny, the build reproducible
+// and the CI build fast, and it removes every dependency-resolution failure mode.
+plugins {
+    id 'com.android.application' version '8.5.2' apply false
+}
+
+tasks.register('clean', Delete) {
+    delete rootProject.layout.buildDirectory
+}

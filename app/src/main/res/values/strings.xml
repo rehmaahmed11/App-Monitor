@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- App -->
+    <string name="app_name">AppLens</string>
+    <string name="app_tagline">On-device application monitor</string>
+
+    <!-- Main screen -->
+    <string name="scan_apps">Scan apps</string>
+    <string name="search_apps">Search apps…</string>
+    <string name="sort_by">Sort by</string>
+    <string name="sort_name">Name</string>
+    <string name="sort_package">Package</string>
+    <string name="sort_install">Installation date</string>
+    <string name="sort_update">Update date</string>
+    <string name="sort_size">Size</string>
+    <string name="filter_all">All</string>
+    <string name="filter_user">User</string>
+    <string name="filter_system">System</string>
+    <string name="filter_running">Running</string>
+    <string name="filter_monitored">Monitored</string>
+    <string name="recently_scanned">Previously scanned</string>
+    <string name="scanning">Scanning installed applications…</string>
+    <string name="no_apps_found">No application matches your search</string>
+    <string name="app_count">%1$d applications</string>
+
+    <!-- Root -->
+    <string name="root_granted">Root granted</string>
+    <string name="root_denied">Root denied</string>
+    <string name="root_checking">Requesting root…</string>
+    <string name="root_retry">Grant root</string>
+
+    <!-- Detail -->
+    <string name="start_monitoring">START MONITORING</string>
+    <string name="stop_monitoring">STOP MONITORING</string>
+    <string name="monitoring">Monitoring</string>
+    <string name="tab_overview">OVERVIEW</string>
+    <string name="tab_permissions">PERMISSIONS</string>
+    <string name="tab_activity">ACTIVITY</string>
+    <string name="tab_network">NETWORK</string>
+    <string name="tab_dns">DNS</string>
+    <string name="tab_data">DATA</string>
+    <string name="tab_access">ACCESS</string>
+    <string name="tab_timeline">TIMELINE</string>
+
+    <!-- Generic -->
+    <string name="search">Search</string>
+    <string name="clear">Clear</string>
+    <string name="refresh">Refresh</string>
+    <string name="export">Export</string>
+    <string name="open_logs">Open logs</string>
+    <string name="logs_title">Activity records</string>
+    <string name="logs_path_hint">All activity records are written to /sdcard/AppLens as plain text.</string>
+    <string name="not_available">n/a</string>
+    <string name="back">Back</string>
+    <string name="ok">OK</string>
+    <string name="cancel">Cancel</string>
+    <string name="loading">Loading…</string>
+    <string name="unknown">Unknown</string>
+    <string name="yes">Yes</string>
+    <string name="no">No</string>
+    <string name="enable_all">GRANT ALL</string>
+    <string name="start_activity">Open app</string>
+    <string name="app_info">App info</string>
+    <string name="force_stop">Force stop</string>
+</resources>

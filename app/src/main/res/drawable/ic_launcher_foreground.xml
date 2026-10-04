@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- lens ring -->
+    <path
+        android:pathData="M50,48m-22,0a22,22 0 1,0 44,0a22,22 0 1,0 -44,0"
+        android:fillColor="#00000000"
+        android:strokeColor="#22D3EE"
+        android:strokeWidth="5.5" />
+    <!-- handle -->
+    <path
+        android:pathData="M65.5,63.5L78,76"
+        android:fillColor="#00000000"
+        android:strokeColor="#22D3EE"
+        android:strokeWidth="7"
+        android:strokeLineCap="round" />
+    <!-- activity bars inside the lens -->
+    <path
+        android:pathData="M36,54h4v8h-4z"
+        android:fillColor="#8B5CF6" />
+    <path
+        android:pathData="M44,46h4v16h-4z"
+        android:fillColor="#34D399" />
+    <path
+        android:pathData="M52,38h4v24h-4z"
+        android:fillColor="#FBBF24" />
+    <path
+        android:pathData="M60,48h4v14h-4z"
+        android:fillColor="#22D3EE" />
+    <path
+        android:pathData="M50,68m-2.5,0a2.5,2.5 0 1,0 5,0a2.5,2.5 0 1,0 -5,0"
+        android:fillColor="#E8F0F7" />
+</vector>

@@ -1,0 +1,89 @@
+plugins {
+    id 'com.android.application'
+}
+
+def storeFilePath = project.findProperty('applensStoreFile') ?: ''
+def storePassword = project.findProperty('applensStorePassword') ?: ''
+def keyAlias = project.findProperty('applensKeyAlias') ?: ''
+def keyPassword = project.findProperty('applensKeyPassword') ?: ''
+def hasReleaseKeystore = storeFilePath && file(storeFilePath).exists()
+
+android {
+    namespace 'com.applens.monitor'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId "com.applens.monitor"
+        minSdk 26
+        targetSdk 34
+        versionCode 1
+        versionName "1.0.0"
+        resConfigs "en"
+        vectorDrawables.useSupportLibrary false
+    }
+
+    signingConfigs {
+        if (hasReleaseKeystore) {
+            release {
+                storeFile file(storeFilePath)
+                storePassword storePassword
+                keyAlias keyAlias
+                keyPassword keyPassword
+                enableV1Signing true
+                enableV2Signing true
+            }
+        }
+    }
+
+    buildTypes {
+        debug {
+            applicationIdSuffix ".debug"
+            versionNameSuffix "-debug"
+            minifyEnabled false
+            debuggable true
+        }
+        release {
+            minifyEnabled false
+            shrinkResources false
+            debuggable false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+            // Fall back to the debug key so that CI always emits an installable APK.
+            signingConfig hasReleaseKeystore ? signingConfigs.release : signingConfigs.debug
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    buildFeatures {
+        buildConfig true
+    }
+
+    packaging {
+        resources {
+            excludes += ['META-INF/*.kotlin_module', 'META-INF/DEPENDENCIES', 'META-INF/LICENSE*', 'META-INF/NOTICE*']
+        }
+    }
+
+    lint {
+        abortOnError false
+        checkReleaseBuilds false
+    }
+}
+
+// Copies the produced APKs into build/artifacts with predictable, release friendly names.
+def copyApk = { variantName, suffix ->
+    tasks.register("packageApk${variantName.capitalize()}", Copy) {
+        dependsOn "assemble${variantName.capitalize()}"
+        from(layout.buildDirectory.dir("outputs/apk/${variantName == 'release' ? 'release' : 'debug'}")) {
+            include '**/*.apk'
+        }
+        into layout.buildDirectory.dir("artifacts")
+        rename { String name -> "AppLens-${suffix}-${name}" }
+    }
+}
+
+copyApk('debug', 'debug')
+copyApk('release', 'release')
