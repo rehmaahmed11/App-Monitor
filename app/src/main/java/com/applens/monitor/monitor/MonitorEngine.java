@@ -34,6 +34,10 @@ public final class MonitorEngine {
     private static final long PROCESS_PERIOD_MS = 1500;
     private static final long BYTES_PERIOD_MS = 4000;
     private static final long MEMORY_PERIOD_MS = 12000;
+    /** Upper bound on events handed to the UI feed per second. */
+    private static final int MAX_EVENTS_PER_SECOND = 60;
+    /** Minimum CPU time (in scheduler ticks) before a process is worth reporting. */
+    private static final long CPU_TICKS_THRESHOLD = 5;
 
     private final Context context;
     private final String pkg;
@@ -45,6 +49,12 @@ public final class MonitorEngine {
     private final Map<Integer, Long> lastCpuTicks = new HashMap<>();
     private final Set<Long> socketInodes = new HashSet<>();
     private final Set<String> knownConnections = new HashSet<>();
+
+    private final Object rateLock = new Object();
+    private long windowStart;
+    private int windowCount;
+    private long droppedInWindow;
+    private long lastThrottleNotice;
 
     private ScheduledExecutorService scheduler;
     private LogcatMonitor logcatMonitor;
@@ -78,43 +88,64 @@ public final class MonitorEngine {
         socketMonitor = new SocketMonitor(pkg);
         byteCounter = new ByteCounter(uid);
 
+        // Every sampler is optional. One that cannot start is a missing data
+        // source, never a failed session — and never an uncaught exception on the
+        // bootstrap thread, which would take the whole application down.
         if (RootShell.get().ensureRoot()) {
-            byteCounter.install();
-            hub.addSource("byte:" + byteCounter.source());
+            try {
+                byteCounter.install();
+                hub.addSource("byte:" + byteCounter.source());
+            } catch (Throwable error) {
+                DiagnosticLog.recordProblem("Traffic counters could not be installed", error);
+            }
         }
 
-        logcatMonitor = new LogcatMonitor(pkg, new LogcatMonitor.ActivitySink() {
-            @Override
-            public void onEvent(EventItem event) {
-                publish(event);
+        try {
+            logcatMonitor = new LogcatMonitor(pkg, new LogcatMonitor.ActivitySink() {
+                @Override
+                public void onEvent(EventItem event) {
+                    publish(event);
+                }
+            });
+            if (logcatMonitor.isSupported()) {
+                logcatMonitor.start();
+                hub.addSource("logcat");
             }
-        });
-        if (logcatMonitor.isSupported()) {
-            logcatMonitor.start();
-            hub.addSource("logcat");
+        } catch (Throwable error) {
+            DiagnosticLog.recordProblem("Activity log reader could not be started", error);
         }
 
-        fileWatch = new FileWatchMonitor(pkg, dataDir(), new FileWatchMonitor.ActivitySink() {
-            @Override
-            public void onEvent(EventItem event) {
-                publish(event);
+        try {
+            fileWatch = new FileWatchMonitor(pkg, dataDir(), new FileWatchMonitor.ActivitySink() {
+                @Override
+                public void onEvent(EventItem event) {
+                    publish(event);
+                }
+            });
+            if (fileWatch.isSupported()) {
+                fileWatch.start();
+                hub.addSource("inotifyd");
             }
-        });
-        if (fileWatch.isSupported()) {
-            fileWatch.start();
-            hub.addSource("inotifyd");
+        } catch (Throwable error) {
+            DiagnosticLog.recordProblem("File watcher could not be started", error);
         }
 
         if (com.applens.monitor.net.DnsVpnService.isRunning()) {
             hub.addSource("vpn-dns");
         }
-        if (RootShell.get().tcpdump() != null) {
-            tcpdump = new TcpdumpMonitor(pkg);
-            tcpdump.start();
-            hub.addSource("tcpdump");
-            flowMonitor = new TcpdumpFlowMonitor();
-            flowMonitor.start(this::onPacket);
-            hub.addSource("tcpdump-flows");
+        try {
+            // tcpdump() is null unless the binary really exists, so nothing is
+            // spawned (and no superuser prompt raised) on a device without it.
+            if (RootShell.get().tcpdump() != null) {
+                tcpdump = new TcpdumpMonitor(pkg);
+                tcpdump.start();
+                hub.addSource("tcpdump");
+                flowMonitor = new TcpdumpFlowMonitor();
+                flowMonitor.start(this::onPacket);
+                hub.addSource("tcpdump-flows");
+            }
+        } catch (Throwable error) {
+            DiagnosticLog.recordProblem("Packet capture could not be started", error);
         }
 
         scheduler = Executors.newScheduledThreadPool(3, runnable -> {
@@ -130,6 +161,7 @@ public final class MonitorEngine {
                 3000, BYTES_PERIOD_MS, TimeUnit.MILLISECONDS);
         scheduler.scheduleWithFixedDelay(this::sampleMemory,
                 5000, MEMORY_PERIOD_MS, TimeUnit.MILLISECONDS);
+        hub.publishStateNow();
     }
 
     public void stop() {
@@ -141,26 +173,64 @@ public final class MonitorEngine {
             scheduler = null;
         }
         if (logcatMonitor != null) {
-            logcatMonitor.stop();
+            closeQuietly(new Runnable() {
+                @Override
+                public void run() {
+                    logcatMonitor.stop();
+                }
+            }, "logcat reader");
         }
         if (fileWatch != null) {
-            fileWatch.stop();
+            closeQuietly(new Runnable() {
+                @Override
+                public void run() {
+                    fileWatch.stop();
+                }
+            }, "file watcher");
         }
         if (tcpdump != null) {
-            tcpdump.stop();
+            closeQuietly(new Runnable() {
+                @Override
+                public void run() {
+                    tcpdump.stop();
+                }
+            }, "packet capture");
         }
         if (flowMonitor != null) {
-            flowMonitor.stop();
+            closeQuietly(new Runnable() {
+                @Override
+                public void run() {
+                    flowMonitor.stop();
+                }
+            }, "flow accounting");
         }
         if (byteCounter != null) {
-            byteCounter.uninstall();
+            closeQuietly(new Runnable() {
+                @Override
+                public void run() {
+                    byteCounter.uninstall();
+                }
+            }, "traffic counters");
         }
         EventItem e = EventItem.of(EventCategory.PROCESS, "Monitoring stopped",
                 "Captured " + hub.stateSnapshot().eventCount + " events", "AppLens");
         hub.publish(e);
         ActivityLogWriter.get().writeRaw("--- monitoring session ended ---");
         ActivityLogWriter.get().flush();
-        hub.publishState();
+        hub.publishStateNow();
+    }
+
+    /** Shutting a sampler down must never prevent the next one from stopping. */
+    private static void closeQuietly(Runnable action, String what) {
+        if (action == null) {
+            return;
+        }
+        try {
+            action.run();
+        } catch (Throwable error) {
+            DiagnosticLog.recordThrottledProblem("stop-" + what,
+                    "Could not stop the " + what + " cleanly", error);
+        }
     }
 
     private String dataDir() {
@@ -191,7 +261,9 @@ public final class MonitorEngine {
                 boolean isNew = previous == null;
                 if (previous != null) {
                     long delta = cpu - previous;
-                    if (delta > 0) {
+                    // A couple of scheduler ticks is background noise; reporting it
+                    // every 1.5 s per process buried the interesting events.
+                    if (delta >= CPU_TICKS_THRESHOLD) {
                         EventItem e = EventItem.of(EventCategory.PERFORMANCE, "CPU activity",
                                 stat.name + " used " + delta + " ticks ("
                                         + Fmt.bytes(stat.rssKb * 1024) + " RSS, "
@@ -341,7 +413,7 @@ public final class MonitorEngine {
                 return;
             }
             String dump = RootShell.get().exec("dumpsys meminfo " + RootShell.shQuote(pkg)
-                    + " 2>/dev/null | head -40", 20000);
+                    + " 2>/dev/null | head -40", 8000);
             if (dump == null) {
                 return;
             }
@@ -369,7 +441,15 @@ public final class MonitorEngine {
         }
     }
 
-    /** Central publish path: hub + plain-text record. */
+    /**
+     * Central publish path: hub + plain-text record.
+     *
+     * <p>The text record always gets everything. The in-memory feed is capped at
+     * {@link #MAX_EVENTS_PER_SECOND}: a chatty application can emit thousands of
+     * log lines a second and the UI cannot — and should not — try to draw them
+     * all. Whenever the cap bites, one notice is published so the gap is visible
+     * instead of silent.</p>
+     */
     public void publish(EventItem event) {
         if (event == null) {
             return;
@@ -377,11 +457,44 @@ public final class MonitorEngine {
         if (event.pkg == null || event.pkg.isEmpty()) {
             event.pkg = pkg;
         }
-        hub.publish(event);
         ActivityLogWriter.get().writeRaw(event.toLogLine(pkg));
+        if (!admit()) {
+            return;
+        }
+        hub.publish(event);
         if (event.important) {
             hub.publishState();
         }
+    }
+
+    /** Token bucket over a one second window; also emits the "throttled" notice. */
+    private boolean admit() {
+        long now = System.currentTimeMillis();
+        long dropped = 0;
+        synchronized (rateLock) {
+            if (now - windowStart >= 1000L) {
+                windowStart = now;
+                windowCount = 0;
+                if (droppedInWindow > 0 && now - lastThrottleNotice > 5000L) {
+                    dropped = droppedInWindow;
+                    lastThrottleNotice = now;
+                }
+                droppedInWindow = 0;
+            }
+            if (windowCount >= MAX_EVENTS_PER_SECOND) {
+                droppedInWindow++;
+                return false;
+            }
+            windowCount++;
+        }
+        if (dropped > 0) {
+            EventItem notice = EventItem.of(EventCategory.SYSTEM, "Activity feed throttled",
+                    dropped + " event(s) were written to the record file but not shown here",
+                    "AppLens");
+            notice.pkg = pkg;
+            hub.publish(notice);
+        }
+        return true;
     }
 
     public List<String> sources() {

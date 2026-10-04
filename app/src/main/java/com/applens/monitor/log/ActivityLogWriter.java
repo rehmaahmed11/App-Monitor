@@ -26,6 +26,9 @@ import java.util.concurrent.atomic.AtomicBoolean;
  */
 public final class ActivityLogWriter {
 
+    /** Hard cap on buffered, not yet written text. */
+    private static final int MAX_BUFFER_BYTES = 1024 * 1024;
+
     private static volatile ActivityLogWriter instance;
 
     private final StringBuilder buffer = new StringBuilder();
@@ -159,13 +162,31 @@ public final class ActivityLogWriter {
         if (!enabled || line == null) {
             return;
         }
+        boolean flushNow = false;
         synchronized (lock) {
             buffer.append(line);
             if (!line.endsWith("\n")) {
                 buffer.append('\n');
             }
-            if (buffer.length() > 48 * 1024) {
-                flush();
+            if (buffer.length() > MAX_BUFFER_BYTES) {
+                // The writer is not keeping up (no root, storage gone). Drop the
+                // oldest half rather than growing until the process is killed.
+                buffer.delete(0, buffer.length() - MAX_BUFFER_BYTES / 2);
+            }
+            flushNow = buffer.length() > 48 * 1024;
+        }
+        if (flushNow) {
+            // Never flush on the caller's thread: writeRaw() is called from the UI
+            // and from every sampler, and a flush goes through root.
+            try {
+                flusher.execute(new Runnable() {
+                    @Override
+                    public void run() {
+                        flush();
+                    }
+                });
+            } catch (Throwable ignored) {
+                // the periodic flusher will pick it up
             }
         }
     }
@@ -193,7 +214,11 @@ public final class ActivityLogWriter {
         try {
             byte[] data = chunk.getBytes(StandardCharsets.UTF_8);
             if (useRoot) {
-                RootShell.get().appendStdin(currentPath, data, 15000);
+                // Through the shared root shell: a dedicated `su` per flush meant a
+                // superuser toast every 1.5 seconds for the whole session.
+                if (!RootShell.get().appendText(currentPath, chunk, 15000)) {
+                    RootShell.get().appendStdin(currentPath, data, 15000);
+                }
             } else if (currentFallback != null) {
                 java.io.FileOutputStream fos = new java.io.FileOutputStream(currentFallback, true);
                 try {

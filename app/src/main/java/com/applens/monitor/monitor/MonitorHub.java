@@ -20,6 +20,10 @@ import java.util.Map;
 public final class MonitorHub {
 
     private static final int MAX_EVENTS = 4000;
+    /** Never repaint the dashboard more often than this (ms). */
+    private static final long STATE_INTERVAL_MS = 400;
+    /** Never deliver more than one activity burst per this many ms. */
+    private static final long EVENT_INTERVAL_MS = 200;
 
     private static volatile MonitorHub instance;
 
@@ -32,6 +36,15 @@ public final class MonitorHub {
     private final Map<String, DnsRecord> dns = new LinkedHashMap<>();
     private final List<ProcessStat> processes = new ArrayList<>();
     private final MonitorState live = new MonitorState();
+
+    private final android.os.Handler ui = new android.os.Handler(android.os.Looper.getMainLooper());
+    private final Object eventGate = new Object();
+    private final Object stateGate = new Object();
+    private EventItem pendingEvent;
+    private boolean eventPostScheduled;
+    private boolean statePostScheduled;
+    private volatile long lastEventPost;
+    private volatile long lastStatePost;
 
     public volatile String pkg = "";
     public volatile String label = "";
@@ -102,6 +115,16 @@ public final class MonitorHub {
     // Events
     // ------------------------------------------------------------------
 
+    /**
+     * Records an event and tells the UI about it.
+     *
+     * <p>A busy application can produce thousands of log lines per second. Posting
+     * one main-thread message per event used to starve the UI thread completely —
+     * the dashboard froze, Android could not even finish the transition to the app
+     * being monitored, and the session ended in an ANR kill. Events are therefore
+     * coalesced: the store is always exact, while observers are woken at most five
+     * times a second with the newest event.</p>
+     */
     public void publish(EventItem event) {
         if (event == null) {
             return;
@@ -114,7 +137,37 @@ public final class MonitorHub {
             live.eventCount++;
             live.lastEvent = event.title;
         }
-        events.post(event);
+        if (!events.hasSubscribers()) {
+            return;
+        }
+        boolean schedule;
+        synchronized (eventGate) {
+            pendingEvent = event;
+            schedule = !eventPostScheduled;
+            if (schedule) {
+                eventPostScheduled = true;
+            }
+        }
+        if (!schedule) {
+            return;
+        }
+        long now = android.os.SystemClock.uptimeMillis();
+        long delay = Math.max(0, lastEventPost + EVENT_INTERVAL_MS - now);
+        ui.postDelayed(new Runnable() {
+            @Override
+            public void run() {
+                EventItem latest;
+                synchronized (eventGate) {
+                    latest = pendingEvent;
+                    pendingEvent = null;
+                    eventPostScheduled = false;
+                }
+                lastEventPost = android.os.SystemClock.uptimeMillis();
+                if (latest != null) {
+                    events.postNow(latest);
+                }
+            }
+        }, delay);
     }
 
     public List<EventItem> events() {
@@ -258,8 +311,38 @@ public final class MonitorHub {
         live.fileEvents += n;
     }
 
-    /** Publishes the current state to every observer. */
+    /**
+     * Publishes the current state to every observer, at most a few times a second.
+     * Every repaint rebuilds the visible tab, so an unthrottled call from each
+     * sampler is what used to make the dashboard unusable.
+     */
     public void publishState() {
+        if (!state.hasSubscribers()) {
+            state.post(stateSnapshot());
+            return;
+        }
+        synchronized (stateGate) {
+            if (statePostScheduled) {
+                return;
+            }
+            statePostScheduled = true;
+        }
+        long now = android.os.SystemClock.uptimeMillis();
+        long delay = Math.max(0, lastStatePost + STATE_INTERVAL_MS - now);
+        ui.postDelayed(new Runnable() {
+            @Override
+            public void run() {
+                synchronized (stateGate) {
+                    statePostScheduled = false;
+                }
+                lastStatePost = android.os.SystemClock.uptimeMillis();
+                state.postNow(stateSnapshot());
+            }
+        }, delay);
+    }
+
+    /** Publishes immediately, used when a session starts or stops. */
+    public void publishStateNow() {
         state.post(stateSnapshot());
     }
 
