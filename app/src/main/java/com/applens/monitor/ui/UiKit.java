@@ -13,6 +13,7 @@ import android.widget.LinearLayout;
 import android.widget.TextView;
 
 import com.applens.monitor.R;
+import com.applens.monitor.log.DiagnosticLog;
 
 /** Small programmatic view factory that keeps every tab visually consistent. */
 public final class UiKit {
@@ -34,11 +35,30 @@ public final class UiKit {
                 ctx.getResources().getDisplayMetrics());
     }
 
+    /**
+     * Resolves a colour, accepting either a colour resource id (the documented contract) or a raw
+     * ARGB literal. Callers should pass resources so the palette stays in one place
+     * ({@code res/values/colors.xml}); literals are tolerated because the two forms are
+     * indistinguishable at the call site and mixing them up used to throw
+     * {@link android.content.res.Resources.NotFoundException} out of {@code onCreate}, taking the
+     * whole screen down with it (see {@code DetailActivity.updateMonitorButton}).
+     */
     public static int color(Context ctx, int res) {
+        if (res < 0) {
+            // Alpha ≥ 0x80: a raw ARGB literal. aapt ids are always positive (0x01…–0x7f…),
+            // so nothing that resolves to a resource can ever land in this branch.
+            return res;
+        }
         try {
             return ctx.getResources().getColor(res, ctx.getTheme());
         } catch (Throwable t) {
-            return ctx.getResources().getColor(res);
+            // Either a low-alpha ARGB literal or an id that cannot be resolved. Honour the value
+            // as a literal so a colour can never crash a screen, and record it for DIAG so the
+            // mistake is still visible instead of silently repainting the UI.
+            DiagnosticLog.recordThrottledProblem("uikit-color", "Colour 0x"
+                    + Integer.toHexString(res) + " is not a resolvable resource id; used as a raw"
+                    + " ARGB value", t);
+            return res;
         }
     }
 

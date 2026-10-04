@@ -83,7 +83,7 @@
             android:layout_marginStart="10dp"
             android:gravity="center"
             android:background="@drawable/bg_button_primary"
-            android:textColor="#FF04121A"
+            android:textColor="@color/text_on_primary"
             android:clickable="true"
             android:focusable="true"
             android:text="SHARE LATEST" />
