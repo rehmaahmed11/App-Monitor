@@ -86,6 +86,7 @@ jobs:
 
       - name: Build debug and release APKs
         run: |
+          set +e
           set -o pipefail
           gradle \
             --no-daemon \
@@ -97,19 +98,20 @@ jobs:
             -PapplensKeyPassword="${{ env.key_password }}" \
             packageApkDebug packageApkRelease 2>&1 | tee build-log.txt
           status=${PIPESTATUS[0]}
+          echo "gradle exit status: $status"
           # Re-emit every compiler error as a check annotation so the failure is
           # visible in the API / UI without opening the raw job log.
-          grep -oE '(/[A-Za-z0-9_./-]+\.(java|xml)): ?[0-9]+: ?(error|warning): .*' build-log.txt \
-            | sort -u | head -100 \
+          grep -oE '[^ ]+\.(java|xml):[ ]?[0-9]+: (error|warning): .*' build-log.txt \
+            | sort -u | head -120 \
             | while IFS= read -r line; do
                 file=$(printf '%s' "$line" | sed -E 's/^([^:]+):.*/\1/')
                 lineno=$(printf '%s' "$line" | sed -E 's/^[^:]+: ?([0-9]+):.*/\1/')
-                msg=$(printf '%s' "$line" | sed -E 's/^[^:]+: ?[0-9]+: ?(error|warning): //')
-                kind=$(printf '%s' "$line" | grep -q "error:" && echo error || echo warning)
+                msg=$(printf '%s' "$line" | sed -E 's/^[^:]+: ?[0-9]+: (error|warning): //')
+                if printf '%s' "$line" | grep -q ": error:"; then kind=error; else kind=warning; fi
                 echo "::${kind} file=${file},line=${lineno},title=javac::${msg}"
-              done || true
-          grep -nE "FAILURE:|What went wrong|Execution failed|AAPT|Android resource|Caused by:" build-log.txt \
-            | head -40 | while IFS= read -r line; do echo "::error title=gradle::${line}"; done || true
+              done
+          grep -E "FAILURE:|What went wrong|Execution failed|AAPT|Android resource|Caused by:|^\* Exception" build-log.txt \
+            | head -40 | while IFS= read -r line; do echo "::error title=gradle::${line}"; done
           exit $status
 
       - name: List artifacts
