@@ -373,8 +373,8 @@ public final class SessionReport {
             kv("writer status", ActivityLogWriter.get().status());
             kv("events", String.valueOf(state.eventCount));
             kv("dns queries", state.dnsQueries + " over " + state.distinctDomains + " domains");
-            kv("connections", connections.size());
-            kv("processes seen", processes.size());
+            kv("connections", String.valueOf(connections.size()));
+            kv("processes seen", String.valueOf(processes.size()));
             kv("file events", String.valueOf(state.fileEvents));
             kv("traffic", "↑ " + Fmt.bytes(state.bytesUp) + "  ↓ " + Fmt.bytes(state.bytesDown)
                     + (state.byteSource.isEmpty() ? "" : "  via " + state.byteSource));

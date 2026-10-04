@@ -497,6 +497,25 @@ public class MonitorService extends Service {
         stopSelf(startId);
     }
 
+    /** Starts the DNS capture VPN for the session. Failure is never fatal. */
+    private void startVpn(String pkg, String label, int uid) {
+        Intent vpn = new Intent(this, com.applens.monitor.net.DnsVpnService.class);
+        vpn.setAction(com.applens.monitor.net.DnsVpnService.ACTION_START);
+        vpn.putExtra(com.applens.monitor.net.DnsVpnService.EXTRA_PKG, pkg);
+        vpn.putExtra(com.applens.monitor.net.DnsVpnService.EXTRA_LABEL, label);
+        vpn.putExtra(com.applens.monitor.net.DnsVpnService.EXTRA_UID, uid);
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                startForegroundService(vpn);
+            } else {
+                startService(vpn);
+            }
+        } catch (Throwable error) {
+            DiagnosticLog.recordProblem("Could not start the DNS capture VPN; monitoring"
+                    + " continues without it", error);
+        }
+    }
+
     private void stopVpn() {
         Intent vpn = new Intent(this, com.applens.monitor.net.DnsVpnService.class);
         vpn.setAction(com.applens.monitor.net.DnsVpnService.ACTION_STOP);
