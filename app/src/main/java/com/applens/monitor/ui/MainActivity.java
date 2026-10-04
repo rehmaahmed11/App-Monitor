@@ -23,6 +23,9 @@ import com.applens.monitor.core.RootShell;
 import com.applens.monitor.log.ActivityLogWriter;
 import com.applens.monitor.log.DiagnosticLog;
 import com.applens.monitor.model.AppItem;
+import com.applens.monitor.monitor.MonitorHub;
+import com.applens.monitor.monitor.MonitorService;
+import com.applens.monitor.monitor.MonitorState;
 import com.applens.monitor.repo.AppRepository;
 import com.applens.monitor.repo.ProcessRepository;
 
@@ -70,6 +73,11 @@ public class MainActivity extends Activity {
     private LinearLayout filterRow;
     private LinearLayout recentsRow;
     private View recentsBlock;
+    private View sessionBanner;
+    private TextView sessionTitle;
+    private TextView sessionDetail;
+    /** Last session identity the list was filtered against. */
+    private String bannerKey = "";
 
     private int sortMode;
     private int filterMode;
@@ -92,6 +100,9 @@ public class MainActivity extends Activity {
         filterRow = findViewById(R.id.filterRow);
         recentsRow = findViewById(R.id.recentsRow);
         recentsBlock = findViewById(R.id.recentsBlock);
+        sessionBanner = findViewById(R.id.sessionBanner);
+        sessionTitle = findViewById(R.id.sessionTitle);
+        sessionDetail = findViewById(R.id.sessionDetail);
         ListView list = findViewById(R.id.appList);
 
         adapter = new AppAdapter(this);
@@ -125,6 +136,23 @@ public class MainActivity extends Activity {
                 startActivity(new Intent(this, DiagnosticsActivity.class)));
         findViewById(R.id.logsButton).setOnClickListener(v ->
                 startActivity(new Intent(this, LogsActivity.class)));
+        findViewById(R.id.settingsButton).setOnClickListener(v ->
+                startActivity(new Intent(this, SettingsActivity.class)));
+        findViewById(R.id.sessionStop).setOnClickListener(v -> {
+            MonitorService.stop(this, "stopped from the dashboard");
+            refreshSessionBanner();
+        });
+        findViewById(R.id.sessionOpen).setOnClickListener(v -> {
+            MonitorHub hub = MonitorHub.get();
+            if (hub.pkg.isEmpty()) {
+                return;
+            }
+            Intent detail = new Intent(this, DetailActivity.class);
+            detail.putExtra(DetailActivity.EXTRA_PKG, hub.pkg);
+            detail.putExtra(DetailActivity.EXTRA_LABEL, hub.label);
+            detail.putExtra(DetailActivity.EXTRA_UID, hub.uid);
+            startActivity(detail);
+        });
 
         buildFilterChips();
         updateSortLabel();
@@ -398,11 +426,79 @@ public class MainActivity extends Activity {
         startActivity(intent);
     }
 
+    /**
+     * The dashboard shows the running session — including the record file it is
+     * writing into — so "is it still running?" never needs a guess.
+     */
+    private void refreshSessionBanner() {
+        MonitorState state = MonitorHub.get().stateSnapshot();
+        boolean live = state.phase != MonitorState.Phase.IDLE;
+        sessionBanner.setVisibility(live ? View.VISIBLE : View.GONE);
+        if (!live) {
+            return;
+        }
+        MonitorHub hub = MonitorHub.get();
+        String name = hub.label == null || hub.label.isEmpty() ? hub.pkg : hub.label;
+        switch (state.phase) {
+            case STARTING:
+                sessionTitle.setText("Starting monitoring · " + name);
+                break;
+            case STOPPING:
+                sessionTitle.setText("Stopping monitoring · " + name);
+                break;
+            default:
+                sessionTitle.setText("Monitoring " + name + " · " + Fmt.duration(state.elapsed()));
+                break;
+        }
+        StringBuilder detail = new StringBuilder();
+        detail.append(state.eventCount).append(" events · ")
+                .append(state.connectionCount).append(" connections · ")
+                .append(state.distinctDomains).append(" domains");
+        if (!state.recordPath.isEmpty()) {
+            detail.append("\n").append(state.recordPath);
+        } else if (!state.recordNote.isEmpty()) {
+            detail.append("\n").append(state.recordNote);
+        }
+        sessionDetail.setText(detail.toString());
+        String key = MonitorHub.get().pkg + "|" + state.phase;
+        if (!key.equals(bannerKey)) {
+            // The "Monitored" filter follows the session; nothing else about the list
+            // depends on it, so this is the only time the list is rebuilt.
+            bannerKey = key;
+            applyFilters();
+        }
+    }
+
+    private final android.os.Handler bannerHandler =
+            new android.os.Handler(android.os.Looper.getMainLooper());
+    private final Runnable bannerTick = new Runnable() {
+        @Override
+        public void run() {
+            refreshSessionBanner();
+            bannerHandler.postDelayed(this, 1000);
+        }
+    };
+
+    private final java.util.function.Consumer<MonitorState> stateConsumer = state -> {
+        refreshSessionBanner();
+    };
+
     @Override
     protected void onResume() {
         super.onResume();
         updateRootChip();
         refreshRunningState();
+        MonitorHub.get().state.subscribe(stateConsumer);
+        refreshSessionBanner();
+        bannerHandler.removeCallbacks(bannerTick);
+        bannerHandler.postDelayed(bannerTick, 1000);
+    }
+
+    @Override
+    protected void onPause() {
+        MonitorHub.get().state.unsubscribe(stateConsumer);
+        bannerHandler.removeCallbacks(bannerTick);
+        super.onPause();
     }
 
     /** Used by the detail screen to come back with fresh information. */

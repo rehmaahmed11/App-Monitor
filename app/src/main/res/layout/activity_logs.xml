@@ -35,14 +35,39 @@
             android:text="Activity records" />
     </LinearLayout>
 
-    <TextView
-        style="@style/T.small"
+    <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
         android:paddingStart="18dp"
-        android:paddingEnd="18dp"
-        android:paddingBottom="8dp"
-        android:text="Every activity record is stored as plain text under /sdcard/AppLens/" />
+        android:paddingEnd="14dp"
+        android:paddingBottom="8dp">
+
+        <TextView
+            android:id="@+id/logsFolderText"
+            style="@style/T.small"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:maxLines="2"
+            android:ellipsize="middle"
+            android:text="Every activity record is stored as plain text." />
+
+        <TextView
+            android:id="@+id/logsSettings"
+            style="@style/T.label"
+            android:layout_width="wrap_content"
+            android:layout_height="36dp"
+            android:layout_marginStart="10dp"
+            android:gravity="center"
+            android:background="@drawable/bg_button_ghost"
+            android:paddingStart="12dp"
+            android:paddingEnd="12dp"
+            android:clickable="true"
+            android:focusable="true"
+            android:text="SETTINGS" />
+    </LinearLayout>
 
     <LinearLayout
         android:id="@+id/fileList"
@@ -72,7 +97,7 @@
             android:background="@drawable/bg_button_ghost"
             android:clickable="true"
             android:focusable="true"
-            android:text="OPEN /sdcard/AppLens" />
+            android:text="OPEN FOLDER" />
 
         <TextView
             android:id="@+id/shareLatest"

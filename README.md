@@ -63,6 +63,10 @@ Opens straight onto the **previously scanned** application list.
 * **Filter chips**: all · user · system · running · monitored.
 * **PREVIOUSLY SCANNED** chips jump back to the apps you already looked at.
 * The header chip shows root state — tap it to re-request root.
+* A **live session banner** appears above the list while something is monitored:
+  the elapsed time, the event and connection counts, the exact record file, and
+  **OPEN**/**STOP** buttons. Start and stop state is never a guess.
+* **SET** opens *Report settings* (output folder, report content, DNS capture).
 * **DIAG** opens saved crash/error reports. If Android reports that AppLens crashed
   or stopped unexpectedly, the report opens automatically the next time AppLens starts.
 * **TXT** continues to browse and share the per-app activity record files.
@@ -91,9 +95,10 @@ Eight tabs, each backed by a different data source:
 | **ACCESS** | device fingerprint: build identity, root manager, SELinux, kernel, IP/MAC/DNS/route/Wi-Fi, Android ID, serial, IMEI, last known location, sensors, battery, user profiles | `Build`, framework APIs, root `getprop`/`ip`/`dumpsys location` |
 | **TIMELINE** | every observation merged into one chronological record | all of the above |
 
-### 2.3 Activity records on the SD card
+### 2.3 Activity records on the shared storage
 
-Every event is appended to a plain-text file:
+Every event is appended to a plain-text file. The folder is configurable — the
+default is:
 
 ```
 /sdcard/AppLens/com.facebook.katana/activity_2026-10-04_11-59-08.txt
@@ -109,18 +114,49 @@ Package         : com.facebook.katana
 Device          : Google Pixel 7
 Android         : 14 (API 34)
 Build           : google/panther.ap3a.240705.005/...
+Record file     : /sdcard/AppLens/com.facebook.katana/activity_...txt
+Output folder   : /sdcard/AppLens (one folder per app)
+Full report     : yes — snapshot at start, summary at stop
 Root            : granted via su
+---------------------------------------------------------------------
+ SNAPSHOT — target application and device (04 Oct 2026, 11:59:09)
+---------------------------------------------------------------------
+  [IDENTITY]           uid, version, target SDK, installer, APK, data dir …
+  [PERMISSIONS]        every permission, grouped, granted/denied, AppOps mode
+  [APP OPS]            the full appops get dump
+  [COMPONENTS]         activities / services / receivers / providers
+  [STORAGE AT START]   per-directory breakdown, file/database counts, largest file
+  [PROCESSES AT START] pid, rss, threads, fds, sockets, native libraries
+  [DEVICE]             build identity, root manager, SELinux, network, identifiers
+  [MONITORING …]       which samplers are on, tools found, record path, settings
 ---------------------------------------------------------------------
 10:32:14.221  [LOCATION] Location request — 37.7749, -122.4194  <source: logcat:GnssLocationProvider>  <app: com.facebook.katana>
 10:32:17.884  [NETWORK] Connection opened — TCP 443 (established)  <source: /proc/net>  <app: com.facebook.katana>
 10:32:18.010  [DNS] graph.facebook.com  type=A  transport=UDP  answers=31.13.24.12  queried=1x  server=8.8.8.8  <app: com.facebook.katana>  <source: VPN>
 10:32:19.443  [CAMERA] Camera service access — CameraService: ...  <source: logcat:CameraService>  <app: com.facebook.katana>
-10:32:24.901  [MICROPHONE] Audio HAL client — AudioFlinger: ...  <source: logcat:AudioFlinger>  <app: com.facebook.katana>
+---------------------------------------------------------------------
+ HEARTBEAT — 5:00 of monitoring          (every 5 minutes by default)
+---------------------------------------------------------------------
+  events, connections, domains, processes, PSS, traffic, sources, top domains
+---------------------------------------------------------------------
+ SESSION SUMMARY — 04 Oct 2026, 12:04:11
+---------------------------------------------------------------------
+  stop reason, duration, record size, events by category, every domain resolved,
+  every connection with its per-flow byte counters, the process table at stop
+=====================================================================
+ End of record — 04 Oct 2026, 12:04:11
+=====================================================================
 ```
 
+The file is **verified while it is opened**: folder created, header flushed, then
+the size checked. A folder that root (or the app) cannot write to is reported in
+*Report settings* and on the detail screen, and the writer falls back — in order —
+to `/sdcard/AppLens`, to the app's own external folder and finally to app storage,
+saying so in the record header and in the UI.
+
 Open the **TXT** button on the dashboard to browse, open or share the records.
-Files are written through root into the shared volume; without root AppLens falls
-back to its own external directory (and offers all-files access on Android 11+).
+Records written through root that the app process cannot read directly are copied
+into the app's own folder before sharing.
 
 ### 2.4 Crash and error diagnostics
 
@@ -145,6 +181,42 @@ message; **CLEAR** deletes it. Reports stay in AppLens's private app storage, ar
 bounded to 512 KiB and are never uploaded automatically. They include device/app
 version and stack details, so review the text before sharing. Clearing reports does
 not affect the separate activity records under `/sdcard/AppLens`.
+
+### 2.5 Report settings
+
+**SET** on the dashboard (or **SETTINGS** on the detail and record screens) opens
+the output configuration:
+
+| Setting | Effect |
+|---|---|
+| **Output folder** | Where the `activity_*.txt` files go. Presets, a free-text path, and a **BROWSE** button that takes a folder from the system picker and converts it back into a real path. |
+| **CREATE & TEST** | Creates the folder and writes a probe file, then says whether it is really writable — with the reason when it is not (no root, read-only volume, no access). |
+| **Write the text report** | Turns the record file off without turning monitoring off. |
+| **One sub-folder per application** | `…/AppLens/<package>/activity_*.txt`, or every report in the chosen folder. |
+| **Full report** | The start-of-session snapshot, the periodic heartbeat and the closing summary (see 2.3). |
+| **Heartbeat** | Off, 1, 5, 15 or 30 minutes between heartbeat blocks. |
+| **DNS capture (local VPN)** | Whether a session records DNS through the capture VPN. |
+
+The screen also shows how many records exist, the newest one, and the writer's
+current status, so "where is my report?" is answered on the spot.
+
+### 2.6 Starting and stopping a session
+
+**START MONITORING** sends **one** request to the service, which replaces whatever
+session was running. (Two requests — "stop the old one" then "start the new one" —
+used to race with the service's own destruction and could take the fresh session
+down with it after a few seconds.) While the samplers come up the button reads
+**STARTING…**, then **STOP MONITORING** (red) while the session runs, then
+**STOPPING…**, and the status line always says why a session ended.
+
+If Android kills the process anyway (low memory, battery optimiser, a force stop),
+the session is remembered and the service picks it back up when the system
+restarts it; the diagnostics show the interruption either way. A stop uses
+`stopSelf(startId)`, so a start that arrives during the teardown is never
+cancelled by it.
+
+The notification follows the same state (elapsed time, events, record file, a
+**Stop** action) and is refreshed once a second while a session is live.
 
 ---
 
@@ -199,9 +271,17 @@ application, so its start-up is part of the record:
 3. a breadcrumb is written before the samplers start and cleared on a clean stop,
    so a session killed without a Java exception (ANR, low memory, force stop)
    still produces a report on the next launch;
-4. the target is launched through its launcher intent; if the activity manager
+4. the record file is opened **and verified** (folder created, header flushed,
+   size checked) before the first sampler starts; a folder that cannot be written
+   is reported and the next candidate in the fallback chain is used;
+5. the target is launched through its launcher intent; if the activity manager
    refuses a start from a service, or the app has no launcher activity, root
-   `monkey`/`am start` is used instead.
+   `monkey`/`am start` is used instead;
+6. the whole request carries a sequence number, so a start that is superseded by a
+   stop (or the other way round) aborts instead of fighting the newer request;
+7. if the service is destroyed without a stop request while the samplers are still
+   running, it brings itself back to the foreground; if the process really was
+   killed, the session is resumed from the stored request on the next start.
 
 ### The DNS capture VPN
 
@@ -217,12 +297,29 @@ device is affected:
   traffic keeps flowing through Wi-Fi/cellular untouched;
 * the real resolvers come from `ConnectivityManager.getLinkProperties()`, with the
   root `getprop`/`ip` probes only as a fallback;
+* **fail-open by construction.** Three separate guards keep the capture from ever
+  costing the monitored application its internet access:
+  1. before the TUN is established, every resolver the device knows is probed with
+     a real query — if none answers, the capture is **not started at all**;
+  2. a lookup is retried against every other resolver (2.5 s each, 7 s total) and a
+     cached answer is served before anything is given up on;
+  3. after four forwarding failures in twenty seconds the TUN is closed
+     immediately, the firewall rules are removed and the application falls back to
+     the device's own resolver. The reason is written into the record, the DNS tab
+     and the diagnostics;
+* only the synthetic resolver is routed into the TUN. The device's real resolvers
+  are deliberately **not** given `/32` routes: that would also capture every other
+  connection the application makes to those addresses (a router that is both a
+  resolver and a web server) and a dropped packet there looks exactly like
+  "the app lost its internet";
 * queries arriving on the TUN are forwarded to a **real** resolver over a
   `protect()`ed socket — never back to the synthetic `10.111.222.2`, which exists
   only inside the TUN — and the answer is synthesised back (IP/UDP checksums
   recomputed, TC bit set when a reply would exceed the MTU so the client falls
   back to TCP). If the upstream cannot be reached the client gets a SERVFAIL
   immediately instead of waiting out its resolver timeout;
+* a network change (Wi-Fi → mobile, resolver change) is watched; the resolver list
+  is re-probed and the capture keeps up with the new network;
 * DNS over **TCP :53** and **DNS-over-TLS :853** are DNAT-ed to a loopback relay
   that pumps the stream and decodes the DNS framing for the log — the transport is
   encrypted and stays encrypted. The `iptables` rules are installed **only after
@@ -236,8 +333,17 @@ device is affected:
   (declared `specialUse` for Android 14), and the whole bring-up — resolver
   discovery, `establish()`, firewall rules — happens off the main thread.
 
-If the VPN is declined, monitoring continues and the DNS tab falls back to
-`tcpdump` (when installed) and to the DNS servers observed in `/proc/net`.
+TCP/`53` and TLS/`853` redirects only match those two ports and only the
+monitored uid, and they are installed *after* the loopback relay is listening.
+Without root there is no redirect at all, so a TCP DNS connection is answered
+with a reset instead of being left to time out — the client retries over UDP at
+once and the application keeps working.
+
+If the VPN is declined or the capture stands itself down, monitoring continues and
+the DNS tab falls back to `tcpdump` (when installed) and to the DNS servers
+observed in `/proc/net`. DNS capture can also be switched off permanently in
+*Report settings*, and a one-off session without it can be started by
+**long-pressing START MONITORING**.
 
 ### Keeping the UI alive
 
@@ -301,6 +407,7 @@ app/src/main/java/com/applens/monitor/
 │               Fmt              bytes / duration / clock formatting
 │               Bus              tiny main-thread observable (no AndroidX)
 │               Prefs            typed SharedPreferences
+│               LogSettings      output folder, report content, DNS capture switches
 ├── model/      AppItem AppFacts PermissionItem EventItem ConnectionItem
 │               DnsRecord ProcessStat StorageItem DeviceProfile EventCategory
 ├── repo/       AppRepository    scanning, sorting, sizes, scan history
@@ -316,9 +423,11 @@ app/src/main/java/com/applens/monitor/
 │               DnsHostCache
 ├── net/        DnsVpnService    capture VPN + TCP/DoT loopback relay
 │               DnsMessage       DNS wire format parser/builder
-├── log/        ActivityLogWriter   plain-text records on shared storage
+├── log/        ActivityLogWriter   plain-text records, verified writes, fallbacks
+│               SessionReport      start snapshot, heartbeat, closing summary
 │               DiagnosticLog      bounded local crash/error reports + crash hook
 ├── ui/         MainActivity DetailActivity LogsActivity DiagnosticsActivity
+│               SettingsActivity   output folder picker + report switches
 │               tabs/            Overview Permissions Activity Network Dns Data
 │                              Access Timeline
 │               widget/          SparklineView RingView

@@ -14,6 +14,7 @@ import com.applens.monitor.util.ShareProvider;
 
 import com.applens.monitor.R;
 import com.applens.monitor.core.Fmt;
+import com.applens.monitor.core.LogSettings;
 import com.applens.monitor.core.RootShell;
 import com.applens.monitor.log.ActivityLogWriter;
 
@@ -24,15 +25,22 @@ import java.util.List;
 public class LogsActivity extends Activity {
 
     private LinearLayout list;
+    private TextView folderText;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_logs);
         list = findViewById(R.id.fileList);
+        folderText = findViewById(R.id.logsFolderText);
         findViewById(R.id.backButton).setOnClickListener(v -> finish());
         findViewById(R.id.openFolder).setOnClickListener(v -> openFolder());
         findViewById(R.id.shareLatest).setOnClickListener(v -> shareLatest());
+        View settings = findViewById(R.id.logsSettings);
+        if (settings != null) {
+            settings.setOnClickListener(v ->
+                    startActivity(new Intent(this, SettingsActivity.class)));
+        }
     }
 
     @Override
@@ -43,12 +51,24 @@ public class LogsActivity extends Activity {
 
     private void render() {
         list.removeAllViews();
+        if (folderText != null) {
+            folderText.setText("Records are plain text in " + LogSettings.folder()
+                    + (LogSettings.folderPerApp() ? "/<package>/" : "/")
+                    + "activity_*.txt");
+        }
         List<File> files = ActivityLogWriter.listRecords(this);
         if (files.isEmpty()) {
             list.addView(UiKit.emptyState(this, R.drawable.ic_file, "No records yet",
-                    "Records are written to /sdcard/AppLens/<package>/activity_*.txt"));
+                    "Records are written to " + LogSettings.folder()
+                            + (LogSettings.folderPerApp() ? "/<package>" : "")
+                            + "/activity_*.txt\n\nChange the folder with SETTINGS on"
+                            + " the previous screen."));
             return;
         }
+        String note = "Folder: " + LogSettings.folder()
+                + (LogSettings.folderPerApp() ? " (one folder per app)" : "")
+                + " · " + files.size() + " file(s)" + writerNote();
+        list.addView(UiKit.emptyState(this, R.drawable.ic_file, "Saved records", note));
         for (File file : files) {
             View row = View.inflate(this, R.layout.item_file, null);
             TextView name = row.findViewById(R.id.fileName);
@@ -70,13 +90,24 @@ public class LogsActivity extends Activity {
         share(files.get(0));
     }
 
+    private String writerNote() {
+        String status = ActivityLogWriter.get().status();
+        if (status == null || status.isEmpty()) {
+            return "";
+        }
+        return "\nWriter: " + status;
+    }
+
     private void share(File file) {
         try {
+            // Files written through root may not be readable by this process; the
+            // writer copies such a record into the app's own folder first.
+            File shareable = ActivityLogWriter.readableForShare(this, file);
             Intent intent = new Intent(Intent.ACTION_SEND);
             intent.setType("text/plain");
-            Uri uri = ShareProvider.uriFor(this, file);
+            Uri uri = ShareProvider.uriFor(this, shareable);
             intent.putExtra(Intent.EXTRA_STREAM, uri);
-            intent.putExtra(Intent.EXTRA_SUBJECT, file.getName());
+            intent.putExtra(Intent.EXTRA_SUBJECT, shareable.getName());
             intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
             startActivity(Intent.createChooser(intent, "Share activity record"));
         } catch (Throwable t) {
@@ -99,11 +130,14 @@ public class LogsActivity extends Activity {
             }
         }
         try {
-            File base = Environment.getExternalStorageDirectory();
-            File dir = new File(base, "AppLens");
+            String folder = LogSettings.folder();
+            File dir = new File(folder);
             if (!dir.exists() && !dir.mkdirs()) {
-                Toast.makeText(this, "Cannot create /sdcard/AppLens", Toast.LENGTH_LONG).show();
-                return;
+                if (!RootShell.get().isRootGranted()
+                        || !RootShell.get().makeFolder(folder).ok) {
+                    Toast.makeText(this, "Cannot create " + folder, Toast.LENGTH_LONG).show();
+                    return;
+                }
             }
             File target = new File(dir, "README.txt");
             if (!target.exists()) {
@@ -130,12 +164,12 @@ public class LogsActivity extends Activity {
     /** Creates the shared-storage folder even before the first session. */
     public static void ensureFolder() {
         try {
+            String folder = LogSettings.folder();
             if (RootShell.get().isRootGranted()) {
-                RootShell.get().exec("mkdir -p "
-                        + RootShell.shQuote(RootShell.get().externalStoragePath() + "/AppLens"));
+                RootShell.get().makeFolder(folder);
                 return;
             }
-            File dir = new File(Environment.getExternalStorageDirectory(), "AppLens");
+            File dir = new File(folder);
             if (!dir.exists()) {
                 dir.mkdirs();
             }

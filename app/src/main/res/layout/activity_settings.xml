@@ -1,0 +1,300 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:background="@color/bg"
+    android:fitsSystemWindows="true">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:paddingStart="12dp"
+        android:paddingEnd="16dp"
+        android:paddingTop="10dp">
+
+        <ImageView
+            android:id="@+id/backButton"
+            android:layout_width="40dp"
+            android:layout_height="40dp"
+            android:padding="10dp"
+            android:src="@drawable/ic_close"
+            android:contentDescription="@string/back"
+            android:clickable="true"
+            android:focusable="true" />
+
+        <TextView
+            style="@style/T.headline"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:layout_marginStart="4dp"
+            android:text="Report settings" />
+    </LinearLayout>
+
+    <ScrollView
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:paddingStart="14dp"
+        android:paddingEnd="14dp"
+        android:paddingBottom="18dp">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical">
+
+            <!-- Output folder -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="6dp"
+                android:orientation="vertical"
+                android:background="@drawable/bg_card"
+                android:padding="16dp">
+
+                <TextView
+                    style="@style/T.label"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="OUTPUT FOLDER FOR THE TXT REPORT" />
+
+                <TextView
+                    android:id="@+id/pathText"
+                    style="@style/T.mono"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:text="/sdcard/AppLens" />
+
+                <TextView
+                    android:id="@+id/pathPreview"
+                    style="@style/T.small"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="6dp"
+                    android:text="" />
+
+                <EditText
+                    android:id="@+id/pathInput"
+                    android:layout_width="match_parent"
+                    android:layout_height="46dp"
+                    android:layout_marginTop="12dp"
+                    android:background="@drawable/bg_search"
+                    android:paddingStart="12dp"
+                    android:paddingEnd="12dp"
+                    android:hint="/sdcard/AppLens"
+                    android:textColor="@color/text"
+                    android:textColorHint="@color/text_faint"
+                    android:textSize="13sp"
+                    android:inputType="textUri"
+                    android:singleLine="true" />
+
+                <HorizontalScrollView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="10dp"
+                    android:scrollbars="none"
+                    android:clipToPadding="false">
+
+                    <LinearLayout
+                        android:id="@+id/presetRow"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:orientation="horizontal" />
+                </HorizontalScrollView>
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="12dp"
+                    android:orientation="horizontal">
+
+                    <TextView
+                        android:id="@+id/browseButton"
+                        style="@style/T.label"
+                        android:layout_width="0dp"
+                        android:layout_height="44dp"
+                        android:layout_weight="1"
+                        android:gravity="center"
+                        android:background="@drawable/bg_button_ghost"
+                        android:clickable="true"
+                        android:focusable="true"
+                        android:text="BROWSE" />
+
+                    <TextView
+                        android:id="@+id/saveButton"
+                        style="@style/T.label"
+                        android:layout_width="0dp"
+                        android:layout_height="44dp"
+                        android:layout_weight="1"
+                        android:layout_marginStart="8dp"
+                        android:gravity="center"
+                        android:background="@drawable/bg_button_primary"
+                        android:textColor="@color/text_on_primary"
+                        android:clickable="true"
+                        android:focusable="true"
+                        android:text="SAVE" />
+
+                    <TextView
+                        android:id="@+id/testButton"
+                        style="@style/T.label"
+                        android:layout_width="0dp"
+                        android:layout_height="44dp"
+                        android:layout_weight="1"
+                        android:layout_marginStart="8dp"
+                        android:gravity="center"
+                        android:background="@drawable/bg_button_ghost"
+                        android:clickable="true"
+                        android:focusable="true"
+                        android:text="CREATE &amp; TEST" />
+                </LinearLayout>
+
+                <TextView
+                    android:id="@+id/pathStatus"
+                    style="@style/T.small"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="10dp"
+                    android:text="" />
+            </LinearLayout>
+
+            <!-- What gets written -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:orientation="vertical"
+                android:background="@drawable/bg_card"
+                android:padding="16dp">
+
+                <TextView
+                    style="@style/T.label"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="WHAT GETS WRITTEN" />
+
+                <Switch
+                    android:id="@+id/switchReport"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="10dp"
+                    android:text="Write the text report"
+                    android:textColor="@color/text"
+                    android:textSize="14sp" />
+
+                <Switch
+                    android:id="@+id/switchPerApp"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:text="One sub-folder per application"
+                    android:textColor="@color/text"
+                    android:textSize="14sp" />
+
+                <Switch
+                    android:id="@+id/switchFull"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:text="Full report: snapshot, heartbeat and summary"
+                    android:textColor="@color/text"
+                    android:textSize="14sp" />
+
+                <TextView
+                    style="@style/T.label"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="14dp"
+                    android:text="HEARTBEAT EVERY" />
+
+                <LinearLayout
+                    android:id="@+id/heartbeatRow"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:orientation="horizontal" />
+            </LinearLayout>
+
+            <!-- DNS capture -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:orientation="vertical"
+                android:background="@drawable/bg_card"
+                android:padding="16dp">
+
+                <TextView
+                    style="@style/T.label"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="DNS CAPTURE (LOCAL VPN)" />
+
+                <Switch
+                    android:id="@+id/switchVpn"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="10dp"
+                    android:text="Record DNS lookups"
+                    android:textColor="@color/text"
+                    android:textSize="14sp" />
+
+                <TextView
+                    android:id="@+id/vpnStatus"
+                    style="@style/T.small"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:text="" />
+
+                <TextView
+                    style="@style/T.small"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="6dp"
+                    android:text="Only the monitored application is routed into the capture. If a lookup cannot be forwarded, AppLens turns the capture off by itself so the application keeps its normal internet access — you can also turn it off here and still see every other record." />
+            </LinearLayout>
+
+            <!-- Records -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:orientation="vertical"
+                android:background="@drawable/bg_card"
+                android:padding="16dp">
+
+                <TextView
+                    style="@style/T.label"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="SAVED RECORDS" />
+
+                <TextView
+                    android:id="@+id/recordsText"
+                    style="@style/T.small"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:text="" />
+
+                <TextView
+                    android:id="@+id/openRecords"
+                    style="@style/T.label"
+                    android:layout_width="match_parent"
+                    android:layout_height="44dp"
+                    android:layout_marginTop="12dp"
+                    android:gravity="center"
+                    android:background="@drawable/bg_button_ghost"
+                    android:clickable="true"
+                    android:focusable="true"
+                    android:text="OPEN THE RECORD LIST" />
+            </LinearLayout>
+
+        </LinearLayout>
+    </ScrollView>
+</LinearLayout>

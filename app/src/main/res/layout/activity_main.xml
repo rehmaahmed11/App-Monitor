@@ -54,6 +54,88 @@
             android:text="ROOT" />
     </LinearLayout>
 
+    <!-- Live monitoring banner -->
+    <LinearLayout
+        android:id="@+id/sessionBanner"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:layout_marginStart="14dp"
+        android:layout_marginEnd="14dp"
+        android:layout_marginTop="10dp"
+        android:background="@drawable/bg_card"
+        android:paddingStart="14dp"
+        android:paddingEnd="10dp"
+        android:paddingTop="10dp"
+        android:paddingBottom="10dp"
+        android:visibility="gone">
+
+        <TextView
+            android:id="@+id/sessionDot"
+            style="@style/T.label"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:textColor="@color/danger"
+            android:text="●" />
+
+        <LinearLayout
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:layout_marginStart="10dp"
+            android:orientation="vertical">
+
+            <TextView
+                android:id="@+id/sessionTitle"
+                style="@style/T.body"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:maxLines="1"
+                android:ellipsize="end"
+                android:textColor="@color/text"
+                android:text="Monitoring" />
+
+            <TextView
+                android:id="@+id/sessionDetail"
+                style="@style/T.small"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="2dp"
+                android:maxLines="2"
+                android:ellipsize="end"
+                android:text="" />
+        </LinearLayout>
+
+        <TextView
+            android:id="@+id/sessionOpen"
+            style="@style/T.label"
+            android:layout_width="wrap_content"
+            android:layout_height="36dp"
+            android:layout_marginStart="8dp"
+            android:gravity="center"
+            android:background="@drawable/bg_button_ghost"
+            android:paddingStart="12dp"
+            android:paddingEnd="12dp"
+            android:clickable="true"
+            android:focusable="true"
+            android:text="OPEN" />
+
+        <TextView
+            android:id="@+id/sessionStop"
+            style="@style/T.label"
+            android:layout_width="wrap_content"
+            android:layout_height="36dp"
+            android:layout_marginStart="6dp"
+            android:gravity="center"
+            android:background="@drawable/bg_button_stop"
+            android:paddingStart="12dp"
+            android:paddingEnd="12dp"
+            android:clickable="true"
+            android:focusable="true"
+            android:text="STOP" />
+    </LinearLayout>
+
     <!-- Previously scanned / recently opened -->
     <LinearLayout
         android:id="@+id/recentsBlock"
@@ -251,6 +333,19 @@
             android:focusable="true"
             android:contentDescription="Open crash and error diagnostics"
             android:text="DIAG" />
+
+        <TextView
+            android:id="@+id/settingsButton"
+            style="@style/T.label"
+            android:layout_width="56dp"
+            android:layout_height="46dp"
+            android:layout_marginStart="8dp"
+            android:gravity="center"
+            android:background="@drawable/bg_button_ghost"
+            android:clickable="true"
+            android:focusable="true"
+            android:contentDescription="Output folder and report settings"
+            android:text="SET" />
 
         <TextView
             android:id="@+id/logsButton"

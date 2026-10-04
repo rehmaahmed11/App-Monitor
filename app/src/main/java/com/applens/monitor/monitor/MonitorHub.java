@@ -76,11 +76,19 @@ public final class MonitorHub {
         this.pkg = pkg;
         this.label = label;
         this.uid = uid;
+        live.phase = MonitorState.Phase.STARTING;
+        live.startError = "";
+        live.stopReason = "";
+        live.recordPath = "";
+        live.recordNote = "";
+        live.recordBytes = 0;
         eventLog.clear();
         connections.clear();
         dns.clear();
         processes.clear();
-        live.active = true;
+        // The session is not "active" until the samplers really are up; that is
+        // what markRunning() publishes.
+        live.active = false;
         live.startedAt = System.currentTimeMillis();
         live.eventCount = 0;
         live.connectionCount = 0;
@@ -97,12 +105,50 @@ public final class MonitorHub {
         live.sources.clear();
     }
 
-    public synchronized void end() {
+    /** Ends the session, remembering why it ended. */
+    public synchronized void end(String reason) {
         live.active = false;
+        live.phase = MonitorState.Phase.IDLE;
+        live.stopReason = reason == null ? "" : reason;
+    }
+
+    public synchronized void end() {
+        end("");
+    }
+
+    /** Marks the samplers as live. */
+    public synchronized void markRunning() {
+        live.active = true;
+        live.phase = MonitorState.Phase.RUNNING;
+    }
+
+    public synchronized void markStopping() {
+        live.phase = MonitorState.Phase.STOPPING;
+        live.active = false;
+    }
+
+    /** A session that could not come up at all. */
+    public synchronized void markFailed(String reason) {
+        live.active = false;
+        live.phase = MonitorState.Phase.IDLE;
+        live.startError = reason == null ? "" : reason;
+    }
+
+    public synchronized void setRecord(String path, String note) {
+        live.recordPath = path == null ? "" : path;
+        live.recordNote = note == null ? "" : note;
+    }
+
+    public synchronized void setRecordBytes(long bytes) {
+        live.recordBytes = bytes;
     }
 
     public boolean isActive() {
         return live.active;
+    }
+
+    public MonitorState.Phase phase() {
+        return live.phase;
     }
 
     public MonitorState stateSnapshot() {
@@ -295,6 +341,11 @@ public final class MonitorHub {
 
     public synchronized void addSource(String source) {
         live.addSource(source);
+    }
+
+    public synchronized void setVpn(String status, String error) {
+        live.vpnStatus = status == null ? "" : status;
+        live.vpnError = error == null ? "" : error;
     }
 
     public synchronized void setBytes(long up, long down, long upRate, long downRate, String source) {

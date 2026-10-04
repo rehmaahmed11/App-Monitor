@@ -17,6 +17,7 @@ import android.widget.Toast;
 
 import com.applens.monitor.R;
 import com.applens.monitor.core.Fmt;
+import com.applens.monitor.core.LogSettings;
 import com.applens.monitor.core.RootShell;
 import com.applens.monitor.log.ActivityLogWriter;
 import com.applens.monitor.model.AppFacts;
@@ -80,6 +81,7 @@ public class DetailActivity extends Activity {
     private TextView appMeta;
     private TextView monitorButton;
     private TextView monitorStatus;
+    private TextView recordText;
     private TextView launchButton;
     private LinearLayout tabRow;
     private android.widget.FrameLayout tabHost;
@@ -89,8 +91,10 @@ public class DetailActivity extends Activity {
     private final List<TextView> tabViews = new ArrayList<>();
     private int currentTab;
     private boolean pendingStart;
+    private boolean pendingVpn;
     private boolean refreshPending;
     private long lastRefresh;
+    private boolean uiTicking;
 
     private TextView statUp;
     private TextView statDown;
@@ -118,6 +122,7 @@ public class DetailActivity extends Activity {
         appMeta = findViewById(R.id.appMeta);
         monitorButton = findViewById(R.id.monitorButton);
         monitorStatus = findViewById(R.id.monitorStatus);
+        recordText = findViewById(R.id.recordText);
         launchButton = findViewById(R.id.launchButton);
         tabRow = findViewById(R.id.tabRow);
         tabHost = (android.widget.FrameLayout) findViewById(R.id.tabContent);
@@ -125,6 +130,18 @@ public class DetailActivity extends Activity {
 
         findViewById(R.id.backButton).setOnClickListener(v -> finish());
         monitorButton.setOnClickListener(v -> onMonitorClicked());
+        // Long press starts the session with the DNS capture switched off for this
+        // run — the quickest way to a working application when its own network
+        // behaviour has to be left completely untouched.
+        monitorButton.setOnLongClickListener(v -> {
+            if (monitorRunningHere()) {
+                return false;
+            }
+            startMonitoring(false);
+            return true;
+        });
+        findViewById(R.id.settingsButton).setOnClickListener(v ->
+                startActivity(new Intent(this, SettingsActivity.class)));
         launchButton.setOnClickListener(v -> launchApp());
         launchButton.setOnLongClickListener(v -> {
             openSystemSettings();
@@ -338,25 +355,35 @@ public class DetailActivity extends Activity {
     // Monitoring
     // ------------------------------------------------------------------
 
-    private void onMonitorClicked() {
-        if (MonitorService.isRunning() && MonitorHub.get().pkg.equals(pkg)) {
-            MonitorService.stop(this);
-            return;
-        }
-        // A new session replaces whatever was monitored before.
-        MonitorService.stop(this);
-        startMonitoring();
+    /** True when this screen's application is the one being monitored. */
+    private boolean monitorRunningHere() {
+        MonitorHub hub = MonitorHub.get();
+        return pkg.equals(hub.pkg) && hub.phase() != MonitorState.Phase.IDLE;
     }
 
-    private void startMonitoring() {
+    private void onMonitorClicked() {
+        if (monitorRunningHere()) {
+            MonitorService.stop(this, "stopped by user");
+            return;
+        }
+        // One request: the service replaces whatever session was running. Asking it
+        // to stop first used to race with its own destruction and could take the
+        // new session down with it after a few seconds.
+        startMonitoring(LogSettings.dnsCapture());
+    }
+
+    private void startMonitoring(boolean withVpn) {
         Intent consent = null;
-        try {
-            consent = VpnService.prepare(this);
-        } catch (Throwable ignored) {
-            // no VPN UI available
+        if (withVpn) {
+            try {
+                consent = VpnService.prepare(this);
+            } catch (Throwable ignored) {
+                // no VPN UI available
+            }
         }
         if (consent != null) {
             pendingStart = true;
+            pendingVpn = true;
             try {
                 startActivityForResult(consent, REQ_VPN);
             } catch (Throwable t) {
@@ -364,12 +391,11 @@ public class DetailActivity extends Activity {
                 launchMonitor(false);
             }
         } else {
-            launchMonitor(true);
+            launchMonitor(withVpn);
         }
     }
 
     private void launchMonitor(boolean withVpn) {
-        MonitorHub.get().begin(pkg, label, uid);
         // The samplers come up first and then the app is brought to the front, so
         // its start-up — the most interesting part — is inside the record.
         MonitorService.start(this, pkg, label, uid, withVpn, true);
@@ -378,6 +404,7 @@ public class DetailActivity extends Activity {
                 : "Monitoring started (no DNS capture) · opening ") + label(),
                 Toast.LENGTH_SHORT).show();
         updateMonitorButton();
+        renderStatus(MonitorHub.get().stateSnapshot());
     }
 
     @Override
@@ -386,9 +413,10 @@ public class DetailActivity extends Activity {
         if (requestCode != REQ_VPN) {
             return;
         }
-        boolean granted = resultCode == RESULT_OK;
+        boolean granted = resultCode == RESULT_OK && pendingVpn;
         if (pendingStart) {
             pendingStart = false;
+            pendingVpn = false;
             launchMonitor(granted);
         }
     }
@@ -431,14 +459,45 @@ public class DetailActivity extends Activity {
         }
     }
 
+    /**
+     * The button is rendered from the shared session phase, not from a second
+     * source of truth: "starting", "running" and "stopping" are impossible to
+     * confuse with "idle", which is what made start/stop look wrong before.
+     */
     private void updateMonitorButton() {
-        boolean mine = MonitorService.isRunning() && MonitorHub.get().pkg.equals(pkg);
-        monitorButton.setText(mine ? getString(R.string.stop_monitoring)
-                : getString(R.string.start_monitoring));
-        monitorButton.setBackgroundResource(mine ? R.drawable.bg_button_stop : R.drawable.bg_button_primary);
+        MonitorHub hub = MonitorHub.get();
+        boolean mine = monitorRunningHere();
+        MonitorState.Phase phase = mine ? hub.phase() : MonitorState.Phase.IDLE;
+        String text;
+        int background;
+        int color;
+        switch (phase) {
+            case STARTING:
+                text = "STARTING…";
+                background = R.drawable.bg_button_ghost;
+                color = R.color.accent;
+                break;
+            case RUNNING:
+                text = getString(R.string.stop_monitoring);
+                background = R.drawable.bg_button_stop;
+                color = R.color.danger;
+                break;
+            case STOPPING:
+                text = "STOPPING…";
+                background = R.drawable.bg_button_ghost;
+                color = R.color.warn;
+                break;
+            default:
+                text = getString(R.string.start_monitoring);
+                background = R.drawable.bg_button_primary;
+                color = R.color.text_on_primary;
+                break;
+        }
+        monitorButton.setText(text);
+        monitorButton.setBackgroundResource(background);
         // The label sits on top of the accent gradient: dark navy when idle, danger red while
         // monitoring. Always pass a colour *resource* here, never a raw ARGB literal — see UiKit.color.
-        monitorButton.setTextColor(UiKit.color(this, mine ? R.color.danger : R.color.text_on_primary));
+        monitorButton.setTextColor(UiKit.color(this, color));
     }
 
     // ------------------------------------------------------------------
@@ -460,35 +519,109 @@ public class DetailActivity extends Activity {
         if (!pkg.equals(hubPkg())) {
             return;
         }
+        renderStatus(state);
+        updateMonitorButton();
+        scheduleRefresh();
+    }
+
+    /** Idempotent status renderer, also driven by the one-second UI ticker. */
+    private void renderStatus(MonitorState state) {
+        if (state == null) {
+            state = MonitorHub.get().stateSnapshot();
+        }
+        boolean mine = pkg.equals(hubPkg());
+        MonitorState.Phase phase = mine ? state.phase : MonitorState.Phase.IDLE;
         statUp.setText(Fmt.bytesShort(state.bytesUp));
         statDown.setText(Fmt.bytesShort(state.bytesDown));
         statDns.setText(String.valueOf(state.dnsQueries));
         statEvents.setText(String.valueOf(state.eventCount));
+
         StringBuilder status = new StringBuilder();
-        status.append(state.active ? "Monitoring " + Fmt.duration(state.elapsed())
-                : "Not monitoring");
-        if (state.active) {
-            status.append(" · ").append(state.connectionCount).append(" connections");
-            status.append(" · ").append(state.distinctDomains).append(" domains");
-            if (state.processCount > 0) {
-                status.append(" · ").append(state.processCount).append(" proc");
-            }
-            if (state.fileEvents > 0) {
-                status.append(" · ").append(state.fileEvents).append(" file events");
-            }
-            if (!state.byteSource.isEmpty()) {
-                status.append(" · bytes via ").append(state.byteSource);
+        switch (phase) {
+            case STARTING:
+                status.append("Starting the monitors…");
+                break;
+            case RUNNING:
+                status.append("● Monitoring ").append(Fmt.duration(state.elapsed()));
+                status.append(" · ").append(state.eventCount).append(" events");
+                status.append(" · ").append(state.connectionCount).append(" connections");
+                status.append(" · ").append(state.distinctDomains).append(" domains");
+                if (state.processCount > 0) {
+                    status.append(" · ").append(state.processCount).append(" proc");
+                }
+                if (state.fileEvents > 0) {
+                    status.append(" · ").append(state.fileEvents).append(" file events");
+                }
+                if (!state.byteSource.isEmpty()) {
+                    status.append(" · bytes via ").append(state.byteSource);
+                }
+                break;
+            case STOPPING:
+                status.append("Stopping…");
+                break;
+            default:
+                status.append("Not monitoring");
+                if (!mine) {
+                    status.append(" — ").append(Fmt.nz(MonitorHub.get().label,
+                            MonitorHub.get().pkg)).append(" is");
+                }
+                break;
+        }
+        if (phase != MonitorState.Phase.IDLE && !state.vpnStatus.isEmpty()) {
+            status.append(" · DNS capture ").append(state.vpnStatus);
+            if (!state.vpnError.isEmpty()) {
+                status.append(" (").append(state.vpnError).append(')');
             }
         }
-        if (DnsVpnService.isRunning()) {
-            status.append(" · DNS VPN ").append(DnsVpnService.statusText());
-            if (!DnsVpnService.errorText().isEmpty()) {
-                status.append(" (").append(DnsVpnService.errorText()).append(')');
-            }
+        if (!state.startError.isEmpty()) {
+            status.append("\n").append(state.startError);
+        }
+        if (phase == MonitorState.Phase.IDLE && !state.stopReason.isEmpty()) {
+            status.append("\nLast session: ").append(state.stopReason);
         }
         monitorStatus.setText(status.toString());
+
+        if (recordText != null) {
+            String path = state.recordPath;
+            if (path == null || path.isEmpty()) {
+                recordText.setText(state.recordNote.isEmpty()
+                        ? "Record file: not started" : "Record file: " + state.recordNote);
+            } else {
+                recordText.setText("Record file: " + path
+                        + (state.recordBytes > 0 ? "  (" + Fmt.bytes(state.recordBytes) + ")" : ""));
+            }
+        }
+    }
+
+    /** Keeps the elapsed time and the record size live between state publishes. */
+    private final Runnable uiTicker = new Runnable() {
+        @Override
+        public void run() {
+            if (!uiTicking) {
+                return;
+            }
+            renderStatus(MonitorHub.get().stateSnapshot());
+            updateMonitorButton();
+            main.postDelayed(this, 1000);
+        }
+    };
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        if (!uiTicking) {
+            uiTicking = true;
+            main.postDelayed(uiTicker, 1000);
+        }
+        renderStatus(MonitorHub.get().stateSnapshot());
         updateMonitorButton();
-        scheduleRefresh();
+    }
+
+    @Override
+    protected void onPause() {
+        uiTicking = false;
+        main.removeCallbacks(uiTicker);
+        super.onPause();
     }
 
     /**

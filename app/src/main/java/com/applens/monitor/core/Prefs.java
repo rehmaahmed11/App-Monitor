@@ -61,9 +61,32 @@ public final class Prefs {
     public static final String K_SIZES = "size_cache";
     public static final String K_LOG_TO_SDCARD = "log_to_sdcard";
     public static final String K_LOG_DIR = "log_dir";
+    public static final String K_LOG_PER_APP = "log_per_app";
+    public static final String K_SNAPSHOT_REPORT = "report_snapshots";
+    public static final String K_HEARTBEAT_MIN = "report_heartbeat_min";
     public static final String K_ROOT_PATH = "root_su_path";
     public static final String K_DNS_VPN = "dns_vpn_enabled";
     public static final String K_PERF_SAMPLE = "perf_sample_ms";
     public static final String K_NOTIFY = "notifications";
     public static final String K_FILTER_CAT = "filter_category";
+
+    // Session bookkeeping, so a service restart (low memory kill, battery
+    // optimiser, "the app just vanished") can pick the session back up instead of
+    // silently ending it after a few seconds.
+    public static final String K_SESSION_PKG = "session_pkg";
+    public static final String K_SESSION_LABEL = "session_label";
+    public static final String K_SESSION_UID = "session_uid";
+    public static final String K_SESSION_VPN = "session_vpn";
+    public static final String K_SESSION_STARTED = "session_started";
+    public static final String K_SESSION_REASON = "session_stop_reason";
+
+    public static void clearSession() {
+        sp().edit()
+                .remove(K_SESSION_PKG)
+                .remove(K_SESSION_LABEL)
+                .remove(K_SESSION_UID)
+                .remove(K_SESSION_VPN)
+                .remove(K_SESSION_STARTED)
+                .apply();
+    }
 }
