@@ -85,6 +85,19 @@ public class LogsActivity extends Activity {
     }
 
     private void openFolder() {
+        if (!RootShell.get().isRootGranted()
+                && android.os.Build.VERSION.SDK_INT >= 30
+                && !Environment.isExternalStorageManager()) {
+            try {
+                Intent intent = new Intent(
+                        android.provider.Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+                        android.net.Uri.parse("package:" + getPackageName()));
+                startActivity(intent);
+                return;
+            } catch (Throwable ignored) {
+                // fall through to the folder view
+            }
+        }
         try {
             File base = Environment.getExternalStorageDirectory();
             File dir = new File(base, "AppLens");

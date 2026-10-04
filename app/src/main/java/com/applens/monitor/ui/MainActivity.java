@@ -130,6 +130,7 @@ public class MainActivity extends Activity {
             statusText.setText(snapshot.size() + " applications from the previous scan"
                     + " · " + Fmt.ago(AppRepository.lastScanTime(this)));
         }
+        askNotificationPermission();
         buildRecents();
         if (all.isEmpty()) {
             startScan();
@@ -137,6 +138,22 @@ public class MainActivity extends Activity {
             refreshRunningState();
         }
         requestRoot(false);
+    }
+
+    private static final int REQ_NOTIFY = 77;
+
+    private void askNotificationPermission() {
+        if (android.os.Build.VERSION.SDK_INT < 33) {
+            return;
+        }
+        try {
+            if (checkSelfPermission("android.permission.POST_NOTIFICATIONS")
+                    != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                requestPermissions(new String[]{"android.permission.POST_NOTIFICATIONS"}, REQ_NOTIFY);
+            }
+        } catch (Throwable ignored) {
+            // the monitoring service works without the notification
+        }
     }
 
     // ------------------------------------------------------------------

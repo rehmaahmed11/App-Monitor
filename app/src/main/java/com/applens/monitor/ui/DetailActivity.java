@@ -127,6 +127,13 @@ public class DetailActivity extends Activity {
             return true;
         });
 
+        appName.setText(label.isEmpty() ? pkg : label);
+        appPackage.setText(pkg);
+        appMeta.setText(uid > 0 ? "uid " + uid : "reading package details…");
+        if (label.isEmpty()) {
+            label = pkg;
+        }
+
         buildLiveStats();
         buildPages();
         selectTab(0);
